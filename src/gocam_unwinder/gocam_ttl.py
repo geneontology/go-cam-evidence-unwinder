@@ -1,13 +1,17 @@
 import argparse
 import os
+
+import ontobio.util.go_utils
 import rdflib
 from ontobio.rdfgen import relations
-
+from rdflib import URIRef
+from prefixcommons import curie_util
 
 parser = argparse.ArgumentParser()
 parser.add_argument('-m', '--model_filename', help="Directory containing GO-CAM models")
 parser.add_argument('-d', '--models_folder', help="Directory containing GO-CAM models")
 parser.add_argument('-l', '--pathway_id_list', help="Only load and search TTL files matching this list")
+parser.add_argument('-o', '--ontology_filename', help="GO ontology filename")
 
 GOCAM_RELATIONS = [str(r) for r in relations.__relation_label_lookup.values()]
 
@@ -44,6 +48,7 @@ class StandardAnnotation:
         if self.edges:
             edge_classes = set()
             for bnode_id, e in self.edges.items():
+                edge_classes.add(e.source_type)
                 edge_classes.add(e.target_type)
             return " ".join(edge_classes)
         else:
@@ -55,14 +60,18 @@ class GoCamGraph:
         self.g = rdflib.graph.Graph()
         self.edges = []
         self.standard_annotations = []
+        self.non_standard_annotations = []
         self.title = None
+        self.individual_to_annotation = {}
 
     @classmethod
     def parse_ttl(GoCamGraph, ttl_filename):
         gocam = GoCamGraph()
         gocam.g.parse(ttl_filename, format="ttl")
+        gocam.title = gocam.get_title()
         gocam.standard_annotations = []
         gocam.extract_standard_annotations()
+        gocam.filter_out_non_std_annotations()
         return gocam
 
     def evidence_triples(self):
@@ -87,10 +96,21 @@ class GoCamGraph:
             if individual_uri in sa.individuals:
                 return sa
 
+    def get_standard_annotations_by_individual(self, individual_uri):
+        standard_annotations = []
+        for sa in self.standard_annotations:
+            if individual_uri in sa.individuals:
+                standard_annotations.append(sa)
+        return standard_annotations
+
     def get_edge_by_bnode_id(self, bnode_id):
         for e in self.edges:
             if e.bnode_id == bnode_id:
                 return e
+
+    def get_title(self):
+        for title in self.g.objects(None, rdflib.DC.title):
+            return title
 
     def find_axiom_bits(self, bnode_id):
         source_id = list(self.g.objects(bnode_id, rdflib.namespace.OWL.annotatedSource))[0]
@@ -122,32 +142,31 @@ class GoCamGraph:
         edges = self.extract_edges()
         # Process all edges first to identify connected components
         edge_to_annotation = {}  # Map to track which annotation each edge belongs to
-        individual_to_annotation = {}  # Map to track which annotation each individual belongs to
 
         for edge in edges:
             edge.source_type = self.get_individual_type(edge.source_uri)
             edge.target_type = self.get_individual_type(edge.target_uri)
 
-            source_annot = individual_to_annotation.get(edge.source_uri)
-            target_annot = individual_to_annotation.get(edge.target_uri)
+            source_annot = self.individual_to_annotation.get(edge.source_uri)
+            target_annot = self.individual_to_annotation.get(edge.target_uri)
 
             if source_annot is None and target_annot is None:
                 # Create new annotation if neither individual belongs to one
                 new_annot = StandardAnnotation()
                 self.standard_annotations.append(new_annot)
                 new_annot.add_edge(edge)
-                individual_to_annotation[edge.source_uri] = new_annot
-                individual_to_annotation[edge.target_uri] = new_annot
+                self.individual_to_annotation[edge.source_uri] = new_annot
+                self.individual_to_annotation[edge.target_uri] = new_annot
                 edge_to_annotation[edge.bnode_id] = new_annot
             elif source_annot is not None and target_annot is None:
                 # Add to source's annotation
                 source_annot.add_edge(edge)
-                individual_to_annotation[edge.target_uri] = source_annot
+                self.individual_to_annotation[edge.target_uri] = source_annot
                 edge_to_annotation[edge.bnode_id] = source_annot
             elif source_annot is None and target_annot is not None:
                 # Add to target's annotation
                 target_annot.add_edge(edge)
-                individual_to_annotation[edge.source_uri] = target_annot
+                self.individual_to_annotation[edge.source_uri] = target_annot
                 edge_to_annotation[edge.bnode_id] = target_annot
             elif source_annot is target_annot:
                 # Both already in same annotation
@@ -157,7 +176,7 @@ class GoCamGraph:
                 # Both individuals belong to different annotations - merge them
                 # Keep source_annot, remove target_annot
                 for ind in list(target_annot.individuals):
-                    individual_to_annotation[ind] = source_annot
+                    self.individual_to_annotation[ind] = source_annot
 
                 # Move all edges from target_annot to source_annot
                 for edge_id, edge_obj in target_annot.edges.items():
@@ -177,8 +196,8 @@ class GoCamGraph:
             for related_edge in self.find_related_edges(edge):
                 annot.add_edge(related_edge)
                 edge_to_annotation[related_edge.bnode_id] = annot
-                individual_to_annotation[related_edge.source_uri] = annot
-                individual_to_annotation[related_edge.target_uri] = annot
+                self.individual_to_annotation[related_edge.source_uri] = annot
+                self.individual_to_annotation[related_edge.target_uri] = annot
 
     # Recursive function to find all edges that are part of the same StandardAnnotation
     def find_related_edges(self, edge: StandardAnnotationEdge, visited_bnodes=None):
@@ -207,6 +226,55 @@ class GoCamGraph:
         return len(sa.edges) > 0
 
 
+class GoCamGraphBuilder:
+    def __init__(self, ontology):
+        parsed_ontology = ontobio.ontol_factory.OntologyFactory().create(ontology)
+        self.go_aspector = ontobio.util.go_utils.GoAspector(parsed_ontology)
+
+    def uri_is_molecular_function(self, uri: URIRef):
+        """
+        Check if the URI refers to a molecular function in the GO ontology.
+        """
+        if uri == URIRef("http://purl.obolibrary.org/obo/go/extensions/reacto.owl#molecular_event"):
+            return True
+        parsed_curies = curie_util.contract_uri(str(uri))
+        # parsed_curie = str(curie_util.contract_uri(str(uri)))
+        if parsed_curies and parsed_curies[0].startswith("GO:"):
+            return self.go_aspector.is_molecular_function(parsed_curies[0])
+        return False
+
+    def parse_ttl(self, ttl_filename):
+        gocam = GoCamGraph()
+        gocam.g.parse(ttl_filename, format="ttl")
+        gocam.title = gocam.get_title()
+        gocam.standard_annotations = []
+        gocam.extract_standard_annotations()
+        gocam = self.filter_out_non_std_annotations(gocam)
+        return gocam
+
+    def filter_out_non_std_annotations(self, go_cam_graph: GoCamGraph):
+        new_standard_annotations = []
+        non_standard_annotations = []
+        for std_annot in go_cam_graph.standard_annotations:
+            part_of_edges = []
+            for edge in std_annot.edges.values():
+                # And source_type is MF or descendant or molecular_event
+                # source_is_mf = False
+                # source_curie = str(curie_util.contract_uri(str(edge.source_type)))
+                # if source_curie.startswith("GO:"):
+                #     source_is_mf = self.go_aspector.is_molecular_function(source_curie)
+                if edge.property_uri == URIRef(relations.lookup_label("part of")) and self.uri_is_molecular_function(edge.source_type):
+                    part_of_edges.append(edge)
+            if len(part_of_edges) > 1:
+                # If there are multiple part_of edges, this is not a standard annotation
+                non_standard_annotations.append(std_annot)
+                continue
+            new_standard_annotations.append(std_annot)
+        go_cam_graph.standard_annotations = new_standard_annotations
+        go_cam_graph.non_standard_annotations = non_standard_annotations
+        return go_cam_graph
+
+
 if __name__ == "__main__":
     args = parser.parse_args()
 
@@ -218,13 +286,16 @@ if __name__ == "__main__":
             if f.endswith(".ttl"):
                 model_files.append(os.path.join(args.models_folder, f))
 
+    go_cam_graph_builder = GoCamGraphBuilder(args.ontology_filename)
+    headers = ["Model ID", "Title", "Standard Annotations", "Non-Standard Annotations", "Mixed Annotation Type"]
+    print("\t".join(headers))
     for f in model_files:
-        gocam_graph = GoCamGraph.parse_ttl(f)
-        print("\t".join([f, str(len(gocam_graph.standard_annotations))]))
-        # for sa in gocam_graph.standard_annotations:
-        #     print("\t".join([str(sa), str(len(sa.get_evidence_uris()))]))
-    # gocam_graph = GoCamGraph.parse_ttl(args.model_filename)
-    # print("\t".join([args.model_filename, str(len(gocam_graph.standard_annotations))]))
-    # for sa in gocam_graph.standard_annotations:
-    #     print("\t".join([str(sa), str(len(sa.get_evidence_uris()))]))
-    x = 4
+        gocam_graph = go_cam_graph_builder.parse_ttl(f)
+        filename = os.path.basename(f)
+        model_id = filename.split(".")[0]
+        sanitized_title = gocam_graph.title.replace("\t", " ").replace("\n", " ")
+        # Print 'Yes' if the graph has a mix of standard annotations and non-standard, otherwise 'No'
+        mixed_annotation_type = "No"
+        if gocam_graph.standard_annotations and gocam_graph.non_standard_annotations:
+            mixed_annotation_type = "Yes"
+        print("\t".join(["gomodel:"+model_id, sanitized_title, str(len(gocam_graph.standard_annotations)), str(len(gocam_graph.non_standard_annotations)), mixed_annotation_type]))

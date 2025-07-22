@@ -1,9 +1,12 @@
 import pytest
 import rdflib
-from gocam_unwinder.gocam_ttl import GoCamGraph
+from gocam_unwinder.gocam_ttl import GoCamGraph, GoCamGraphBuilder
+
+ontology_file = "resources/test/go_20250601.json"  # TODO: Make this GitHub-friendly, maybe LFS
 
 def test_gocam_ttl():
-    gocam_graph = GoCamGraph.parse_ttl("resources/test/SGD_S000004491.ttl")
+    builder = GoCamGraphBuilder(ontology_file)
+    gocam_graph = builder.parse_ttl("resources/test/SGD_S000004491.ttl")
     evidence_triples = list(gocam_graph.evidence_triples())
     assert gocam_graph is not None
     assert len(evidence_triples) == 17
@@ -12,7 +15,15 @@ def test_gocam_ttl():
     std_annot = gocam_graph.get_standard_annotation_by_individual(input_gene)
     assert len(std_annot.edges) == 3
 
+    gocam_graph = builder.parse_ttl("resources/test/MGI_MGI_1335098.ttl")  # has occurs_in extension
+    enabler_gene = rdflib.term.URIRef('http://model.geneontology.org/MGI_MGI_1335098/ddd9e2b1-6c95-48ec-be4f-47d7daa1d19a')
+    std_annot = gocam_graph.get_standard_annotation_by_individual(enabler_gene)
+    assert len(gocam_graph.standard_annotations) == 34
 
-    assert True == True
+    gocam_graph = builder.parse_ttl("resources/test/R-HSA-9937080.ttl")  # Reactome
+    assert len(gocam_graph.standard_annotations) == 0
+    assert len(gocam_graph.non_standard_annotations) == 1
 
-    gocam_graph = GoCamGraph.parse_ttl("resources/test/MGI_MGI_1335098.ttl")  # has occurs_in extension
+    gocam_graph = builder.parse_ttl("resources/test/SYNGO_5371.ttl")  # SynGO
+    assert len(gocam_graph.standard_annotations) == 1
+    assert len(gocam_graph.non_standard_annotations) == 0
