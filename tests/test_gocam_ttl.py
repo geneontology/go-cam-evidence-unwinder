@@ -2,7 +2,7 @@ import pytest
 import rdflib
 from gocam_unwinder.gocam_ttl import GoCamGraph, GoCamGraphBuilder
 
-ontology_file = "resources/test/go_20250601.json"  # TODO: Make this GitHub-friendly, maybe LFS
+ontology_file = "target/go_20250601.json"  # TODO: Make this GitHub-friendly, maybe LFS
 
 def test_gocam_ttl():
     builder = GoCamGraphBuilder(ontology_file)
