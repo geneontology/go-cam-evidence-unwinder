@@ -9,10 +9,10 @@ from prefixcommons import curie_util
 from typing import List
 
 parser = argparse.ArgumentParser()
-parser.add_argument('-m', '--model_filename', help="Directory containing GO-CAM models")
-parser.add_argument('-d', '--models_folder', help="Directory containing GO-CAM models")
-parser.add_argument('-l', '--pathway_id_list', help="Only load and search TTL files matching this list")
-parser.add_argument('-o', '--ontology_filename', help="GO ontology filename")
+parser.add_argument('-m', '--model_filename', help="Single GO-CAM model file to process")
+parser.add_argument('-d', '--models_folder', help="Directory containing GO-CAM model files")
+parser.add_argument('-l', '--pathway_id_list', help="File containing list of model IDs (one per line) to filter processing")
+parser.add_argument('-o', '--ontology_filename', help="GO ontology filename (JSON format)")
 parser.add_argument('--split-evidence', action='store_true', help="Split multi-evidence edges into separate edges")
 parser.add_argument('--output-dir', help="Output directory for split evidence files")
 
@@ -180,8 +180,8 @@ class GoCamGraph:
         target_id = list(self.g.objects(bnode_id, rdflib.namespace.OWL.annotatedTarget))[0]
         relation = list(self.g.objects(bnode_id, rdflib.namespace.OWL.annotatedProperty))[0]
         contributors = list(self.g.objects(bnode_id, rdflib.namespace.DC.contributor))
-        date = list(self.g.objects(bnode_id, rdflib.namespace.DC.date))[0]
-        provided_by = list(self.g.objects(bnode_id, rdflib.URIRef("http://purl.org/pav/providedBy")))[0]
+        date = next(self.g.objects(bnode_id, rdflib.namespace.DC.date), None)  # optional
+        provided_by = next(self.g.objects(bnode_id, rdflib.URIRef("http://purl.org/pav/providedBy")), None)  # optional
         created = next(self.g.objects(bnode_id, rdflib.URIRef("http://purl.org/dc/terms/created")), None)  # optional
         date_accepted = next(self.g.objects(bnode_id, rdflib.URIRef("http://purl.org/dc/terms/dateAccepted")), None)  # optional
         return source_id, target_id, relation, contributors, date, provided_by, created, date_accepted
@@ -349,18 +349,26 @@ class GoCamGraphBuilder:
 if __name__ == "__main__":
     args = parser.parse_args()
 
+    # Load model ID list if provided
+    model_id_filter = None
+    if args.pathway_id_list:
+        with open(args.pathway_id_list, 'r') as f:
+            model_id_filter = set(line.strip() for line in f if line.strip())
+
     model_files = []
     if args.model_filename:
         model_files.append(args.model_filename)
     elif args.models_folder:
         for f in os.listdir(args.models_folder):
             if f.endswith(".ttl"):
-                model_files.append(os.path.join(args.models_folder, f))
+                # If filter is provided, only include models in the filter
+                if model_id_filter is None or f.replace(".ttl", "") in model_id_filter:
+                    model_files.append(os.path.join(args.models_folder, f))
 
     go_cam_graph_builder = GoCamGraphBuilder(args.ontology_filename)
 
     # Always print statistics header
-    headers = ["Model ID", "Title", "Standard Annotations", "Non-Standard Annotations", "Mixed Annotation Type"]
+    headers = ["Model ID", "Title", "Standard Annotations", "Non-Standard Annotations", "Multi-Evidence Annotations", "Mixed Annotation Type"]
     print("\t".join(headers))
 
     if args.split_evidence and args.output_dir:
@@ -376,7 +384,16 @@ if __name__ == "__main__":
         mixed_annotation_type = "No"
         if gocam_graph.standard_annotations and gocam_graph.non_standard_annotations:
             mixed_annotation_type = "Yes"
-        print("\t".join(["gomodel:"+model_id, sanitized_title, str(len(gocam_graph.standard_annotations)), str(len(gocam_graph.non_standard_annotations)), mixed_annotation_type]))
+
+        # Count annotations with multiple evidence on at least one edge
+        multi_evidence_count = 0
+        for std_annot in gocam_graph.standard_annotations:
+            for edge in std_annot.edges.values():
+                if len(edge.evidence_uris) > 1:
+                    multi_evidence_count += 1
+                    break  # Count this annotation once, move to next
+
+        print("\t".join(["gomodel:"+model_id, sanitized_title, str(len(gocam_graph.standard_annotations)), str(len(gocam_graph.non_standard_annotations)), str(multi_evidence_count), mixed_annotation_type]))
 
         # Split evidence if requested
         if args.split_evidence:
