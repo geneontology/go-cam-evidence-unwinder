@@ -6,6 +6,7 @@ import rdflib
 from ontobio.rdfgen import relations
 from rdflib import URIRef
 from prefixcommons import curie_util
+from typing import List
 
 parser = argparse.ArgumentParser()
 parser.add_argument('-m', '--model_filename', help="Directory containing GO-CAM models")
@@ -17,7 +18,11 @@ GOCAM_RELATIONS = [str(r) for r in relations.__relation_label_lookup.values()]
 
 
 class StandardAnnotationEdge:
-    def __init__(self, bnode: rdflib.term.BNode, source_uri: rdflib.term.URIRef, target_uri: rdflib.term.URIRef, property_uri: rdflib.term.URIRef):
+    def __init__(self, bnode: rdflib.term.BNode, source_uri: rdflib.term.URIRef, target_uri: rdflib.term.URIRef,
+                 property_uri: rdflib.term.URIRef,
+                 # contributors: List[rdflib.term.URIRef], date: str,
+                 # provided_by: rdflib.term.URIRef, created: str = None, date_accepted: str = None
+                 ):
         self.bnode_id = str(bnode)
         self.bnode = bnode
         self.source_uri = source_uri
@@ -26,6 +31,11 @@ class StandardAnnotationEdge:
         self.source_type = None
         self.target_type = None
         self.evidence_uris = []
+        # self.contributors = contributors
+        # self.date = date
+        # self.created = created
+        # self.date_accepted = date_accepted
+        # self.provided_by = provided_by
 
 
 class StandardAnnotation:
@@ -56,6 +66,14 @@ class StandardAnnotation:
 
 
 class GoCamGraph:
+    PREDICATES_TO_COPY = [rdflib.RDF.type,
+                          rdflib.namespace.DC.contributor,
+                          rdflib.namespace.DC.date,
+                          rdflib.URIRef("http://purl.org/dc/terms/created"),
+                          rdflib.URIRef("http://purl.org/dc/terms/dateAccepted"),
+                          rdflib.URIRef("http://purl.org/pav/providedBy"),
+                          rdflib.RDFS.comment]
+
     def __init__(self):
         self.g = rdflib.graph.Graph()
         self.edges = []
@@ -73,6 +91,49 @@ class GoCamGraph:
         gocam.extract_standard_annotations()
         gocam.filter_out_non_std_annotations()
         return gocam
+
+    def write_ttl(self, filename):
+        self.g.serialize(destination=filename, format='ttl')
+
+    def split_evidence_and_write_ttl(self, filename):
+        # new_graph = rdflib.Graph()
+        for std_annot in self.standard_annotations:
+            for edge in std_annot.edges.values():
+                counter = 1
+                for evidence_uri in sorted(edge.evidence_uris, key=lambda x: str(x)):
+                    if counter > 1:
+                        # Create a new bnode for each evidence URI
+                        new_bnode = rdflib.term.BNode(edge.bnode_id + "-" + str(counter))
+                        # self.g.add((new_bnode, rdflib.RDF.type, rdflib.namespace.OWL.Axiom))
+                        self.clone_bnode(rdflib.term.BNode(edge.bnode_id), new_bnode)
+                        new_source_uri = rdflib.URIRef(str(edge.source_uri)+"-"+str(counter))
+                        new_target_uri = rdflib.URIRef(str(edge.target_uri)+"-"+str(counter))
+                        self.g.add((new_bnode, rdflib.namespace.OWL.annotatedSource, new_source_uri))
+                        self.g.add((new_bnode, rdflib.namespace.OWL.annotatedTarget, new_target_uri))
+                        self.g.add((new_bnode, rdflib.namespace.OWL.annotatedProperty, edge.property_uri))
+                        self.g.add((new_bnode, rdflib.URIRef("http://geneontology.org/lego/evidence"), evidence_uri))
+                        self.g.remove((rdflib.term.BNode(edge.bnode_id), rdflib.URIRef("http://geneontology.org/lego/evidence"), evidence_uri))
+
+                        # Add types for source and target
+                        self.clone_individual(edge.source_uri, new_source_uri)
+                        self.clone_individual(edge.target_uri, new_target_uri)
+                    counter += 1
+        self.write_ttl(filename)
+
+    def clone_bnode(self, old_bnode: rdflib.term.BNode, new_bnode: rdflib.term.BNode):
+        # Clone the bnode and its properties to a new bnode
+        for pred, obj in self.g.predicate_objects(old_bnode):
+            if pred in self.PREDICATES_TO_COPY:
+                self.g.add((new_bnode, pred, obj))
+
+    def clone_individual(self, old_individual_uri: rdflib.URIRef, new_individual_uri: rdflib.URIRef):
+        # Clone the individual and its properties to a new URI
+        for pred, obj in self.g.predicate_objects(old_individual_uri):
+            if pred in self.PREDICATES_TO_COPY:
+                self.g.add((new_individual_uri, pred, obj))
+        # # Also clone the type
+        # for obj in self.g.objects(old_individual_uri, rdflib.RDF.type):
+        #     self.g.add((new_individual_uri, rdflib.RDF.type, obj))
 
     def evidence_triples(self):
         evidence_rel = rdflib.URIRef("http://geneontology.org/lego/evidence")
@@ -116,7 +177,12 @@ class GoCamGraph:
         source_id = list(self.g.objects(bnode_id, rdflib.namespace.OWL.annotatedSource))[0]
         target_id = list(self.g.objects(bnode_id, rdflib.namespace.OWL.annotatedTarget))[0]
         relation = list(self.g.objects(bnode_id, rdflib.namespace.OWL.annotatedProperty))[0]
-        return source_id, target_id, relation
+        contributors = list(self.g.objects(bnode_id, rdflib.namespace.DC.contributor))
+        date = list(self.g.objects(bnode_id, rdflib.namespace.DC.date))[0]
+        provided_by = list(self.g.objects(bnode_id, rdflib.URIRef("http://purl.org/pav/providedBy")))[0]
+        created = next(self.g.objects(bnode_id, rdflib.URIRef("http://purl.org/dc/terms/created")), None)  # optional
+        date_accepted = next(self.g.objects(bnode_id, rdflib.URIRef("http://purl.org/dc/terms/dateAccepted")), None)  # optional
+        return source_id, target_id, relation, contributors, date, provided_by, created, date_accepted
 
     def find_axiom_bnode_by_triple(self, source_id, relation, target_id):
         for bnode in self.g.subjects(rdflib.namespace.OWL.annotatedSource, source_id):
@@ -129,10 +195,13 @@ class GoCamGraph:
             bnode = triple[0]
             bnode_id = str(bnode)
 
-            source_id, target_id, relation = self.find_axiom_bits(bnode)
+
             edge = self.get_edge_by_bnode_id(bnode_id)
             if edge is None:
-                edge = StandardAnnotationEdge(bnode, source_id, target_id, relation)
+                source_id, target_id, relation, contributors, date, provided_by, created, date_accepted = self.find_axiom_bits(bnode)
+                edge = StandardAnnotationEdge(bnode, source_id, target_id, relation,
+                                              # contributors, date, provided_by, created, date_accepted
+                                              )
                 self.edges.append(edge)
             evidence_id = triple[2]
             edge.evidence_uris.append(evidence_id)
