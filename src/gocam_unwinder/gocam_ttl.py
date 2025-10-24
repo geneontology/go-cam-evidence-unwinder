@@ -13,6 +13,8 @@ parser.add_argument('-m', '--model_filename', help="Directory containing GO-CAM 
 parser.add_argument('-d', '--models_folder', help="Directory containing GO-CAM models")
 parser.add_argument('-l', '--pathway_id_list', help="Only load and search TTL files matching this list")
 parser.add_argument('-o', '--ontology_filename', help="GO ontology filename")
+parser.add_argument('--split-evidence', action='store_true', help="Split multi-evidence edges into separate edges")
+parser.add_argument('--output-dir', help="Output directory for split evidence files")
 
 GOCAM_RELATIONS = [str(r) for r in relations.__relation_label_lookup.values()]
 
@@ -356,15 +358,34 @@ if __name__ == "__main__":
                 model_files.append(os.path.join(args.models_folder, f))
 
     go_cam_graph_builder = GoCamGraphBuilder(args.ontology_filename)
+
+    # Always print statistics header
     headers = ["Model ID", "Title", "Standard Annotations", "Non-Standard Annotations", "Mixed Annotation Type"]
     print("\t".join(headers))
+
+    if args.split_evidence and args.output_dir:
+        os.makedirs(args.output_dir, exist_ok=True)
+
     for f in model_files:
         gocam_graph = go_cam_graph_builder.parse_ttl(f)
         filename = os.path.basename(f)
         model_id = filename.split(".")[0]
         sanitized_title = gocam_graph.title.replace("\t", " ").replace("\n", " ")
-        # Print 'Yes' if the graph has a mix of standard annotations and non-standard, otherwise 'No'
+
+        # Print statistics
         mixed_annotation_type = "No"
         if gocam_graph.standard_annotations and gocam_graph.non_standard_annotations:
             mixed_annotation_type = "Yes"
         print("\t".join(["gomodel:"+model_id, sanitized_title, str(len(gocam_graph.standard_annotations)), str(len(gocam_graph.non_standard_annotations)), mixed_annotation_type]))
+
+        # Split evidence if requested
+        if args.split_evidence:
+            if args.output_dir:
+                output_filename = os.path.join(args.output_dir, filename)
+            else:
+                # Default to same directory with _split suffix
+                base_name = os.path.splitext(f)[0]
+                output_filename = base_name + "_split.ttl"
+
+            gocam_graph.split_evidence_and_write_ttl(output_filename)
+            print(f"Split evidence for {filename} -> {output_filename}")
