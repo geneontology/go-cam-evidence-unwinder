@@ -1,5 +1,6 @@
 import argparse
 import os
+import sys
 
 import ontobio.util.go_utils
 import rdflib
@@ -15,6 +16,7 @@ parser.add_argument('-l', '--pathway_id_list', help="File containing list of mod
 parser.add_argument('-o', '--ontology_filename', help="GO ontology filename (JSON format)")
 parser.add_argument('--split-evidence', action='store_true', help="Split multi-evidence edges into separate edges")
 parser.add_argument('--output-dir', help="Output directory for split evidence files")
+parser.add_argument('--report-file', help="Output file for statistics report (TSV format). If not specified, output goes to stdout.")
 
 GOCAM_RELATIONS = [str(r) for r in relations.__relation_label_lookup.values()]
 
@@ -367,9 +369,17 @@ if __name__ == "__main__":
 
     go_cam_graph_builder = GoCamGraphBuilder(args.ontology_filename)
 
+    # Open report file if specified, otherwise use stdout
+    report_file = None
+    if args.report_file:
+        report_file = open(args.report_file, 'w')
+        output = report_file
+    else:
+        output = sys.stdout
+
     # Always print statistics header
     headers = ["Model ID", "Title", "Standard Annotations", "Non-Standard Annotations", "Multi-Evidence Annotations", "Mixed Annotation Type"]
-    print("\t".join(headers))
+    print("\t".join(headers), file=output)
 
     if args.split_evidence and args.output_dir:
         os.makedirs(args.output_dir, exist_ok=True)
@@ -393,7 +403,7 @@ if __name__ == "__main__":
                     multi_evidence_count += 1
                     break  # Count this annotation once, move to next
 
-        print("\t".join(["gomodel:"+model_id, sanitized_title, str(len(gocam_graph.standard_annotations)), str(len(gocam_graph.non_standard_annotations)), str(multi_evidence_count), mixed_annotation_type]))
+        print("\t".join(["gomodel:"+model_id, sanitized_title, str(len(gocam_graph.standard_annotations)), str(len(gocam_graph.non_standard_annotations)), str(multi_evidence_count), mixed_annotation_type]), file=output)
 
         # Split evidence if requested
         if args.split_evidence:
@@ -406,3 +416,7 @@ if __name__ == "__main__":
 
             gocam_graph.split_evidence_and_write_ttl(output_filename)
             print(f"Split evidence for {filename} -> {output_filename}")
+
+    # Close report file if it was opened
+    if report_file:
+        report_file.close()
