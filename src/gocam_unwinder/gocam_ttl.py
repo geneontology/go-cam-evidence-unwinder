@@ -1,23 +1,32 @@
 import argparse
 import os
+import sys
 
 import ontobio.util.go_utils
 import rdflib
 from ontobio.rdfgen import relations
 from rdflib import URIRef
 from prefixcommons import curie_util
+from typing import List
 
 parser = argparse.ArgumentParser()
-parser.add_argument('-m', '--model_filename', help="Directory containing GO-CAM models")
-parser.add_argument('-d', '--models_folder', help="Directory containing GO-CAM models")
-parser.add_argument('-l', '--pathway_id_list', help="Only load and search TTL files matching this list")
-parser.add_argument('-o', '--ontology_filename', help="GO ontology filename")
+parser.add_argument('-m', '--model_filename', help="Single GO-CAM model file to process")
+parser.add_argument('-d', '--models_folder', help="Directory containing GO-CAM model files")
+parser.add_argument('-l', '--pathway_id_list', help="File containing list of model IDs (one per line) to filter processing")
+parser.add_argument('-o', '--ontology_filename', help="GO ontology filename (JSON format)")
+parser.add_argument('--split-evidence', action='store_true', help="Split multi-evidence edges into separate edges")
+parser.add_argument('--output-dir', help="Output directory for split evidence files")
+parser.add_argument('--report-file', help="Output file for statistics report (TSV format). If not specified, output goes to stdout.")
 
 GOCAM_RELATIONS = [str(r) for r in relations.__relation_label_lookup.values()]
 
 
 class StandardAnnotationEdge:
-    def __init__(self, bnode: rdflib.term.BNode, source_uri: rdflib.term.URIRef, target_uri: rdflib.term.URIRef, property_uri: rdflib.term.URIRef):
+    def __init__(self, bnode: rdflib.term.BNode, source_uri: rdflib.term.URIRef, target_uri: rdflib.term.URIRef,
+                 property_uri: rdflib.term.URIRef,
+                 # contributors: List[rdflib.term.URIRef], date: str,
+                 # provided_by: rdflib.term.URIRef, created: str = None, date_accepted: str = None
+                 ):
         self.bnode_id = str(bnode)
         self.bnode = bnode
         self.source_uri = source_uri
@@ -26,6 +35,11 @@ class StandardAnnotationEdge:
         self.source_type = None
         self.target_type = None
         self.evidence_uris = []
+        # self.contributors = contributors
+        # self.date = date
+        # self.created = created
+        # self.date_accepted = date_accepted
+        # self.provided_by = provided_by
 
 
 class StandardAnnotation:
@@ -56,6 +70,14 @@ class StandardAnnotation:
 
 
 class GoCamGraph:
+    PREDICATES_TO_COPY = [rdflib.RDF.type,
+                          rdflib.namespace.DC.contributor,
+                          rdflib.namespace.DC.date,
+                          rdflib.URIRef("http://purl.org/dc/terms/created"),
+                          rdflib.URIRef("http://purl.org/dc/terms/dateAccepted"),
+                          rdflib.URIRef("http://purl.org/pav/providedBy"),
+                          rdflib.RDFS.comment]
+
     def __init__(self):
         self.g = rdflib.graph.Graph()
         self.edges = []
@@ -73,6 +95,49 @@ class GoCamGraph:
         gocam.extract_standard_annotations()
         gocam.filter_out_non_std_annotations()
         return gocam
+
+    def write_ttl(self, filename):
+        self.g.serialize(destination=filename, format='ttl')
+
+    def split_evidence_and_write_ttl(self, filename):
+        # new_graph = rdflib.Graph()
+        for std_annot in self.standard_annotations:
+            for edge in std_annot.edges.values():
+                counter = 1
+                for evidence_uri in sorted(edge.evidence_uris, key=lambda x: str(x)):
+                    if counter > 1:
+                        # Create a new bnode for each evidence URI
+                        new_bnode = rdflib.term.BNode(edge.bnode_id + "-" + str(counter))
+                        # self.g.add((new_bnode, rdflib.RDF.type, rdflib.namespace.OWL.Axiom))
+                        self.clone_bnode(rdflib.term.BNode(edge.bnode_id), new_bnode)
+                        new_source_uri = rdflib.URIRef(str(edge.source_uri)+"-"+str(counter))
+                        new_target_uri = rdflib.URIRef(str(edge.target_uri)+"-"+str(counter))
+                        self.g.add((new_bnode, rdflib.namespace.OWL.annotatedSource, new_source_uri))
+                        self.g.add((new_bnode, rdflib.namespace.OWL.annotatedTarget, new_target_uri))
+                        self.g.add((new_bnode, rdflib.namespace.OWL.annotatedProperty, edge.property_uri))
+                        self.g.add((new_bnode, rdflib.URIRef("http://geneontology.org/lego/evidence"), evidence_uri))
+                        self.g.remove((rdflib.term.BNode(edge.bnode_id), rdflib.URIRef("http://geneontology.org/lego/evidence"), evidence_uri))
+
+                        # Add types for source and target
+                        self.clone_individual(edge.source_uri, new_source_uri)
+                        self.clone_individual(edge.target_uri, new_target_uri)
+                    counter += 1
+        self.write_ttl(filename)
+
+    def clone_bnode(self, old_bnode: rdflib.term.BNode, new_bnode: rdflib.term.BNode):
+        # Clone the bnode and its properties to a new bnode
+        for pred, obj in self.g.predicate_objects(old_bnode):
+            if pred in self.PREDICATES_TO_COPY:
+                self.g.add((new_bnode, pred, obj))
+
+    def clone_individual(self, old_individual_uri: rdflib.URIRef, new_individual_uri: rdflib.URIRef):
+        # Clone the individual and its properties to a new URI
+        for pred, obj in self.g.predicate_objects(old_individual_uri):
+            if pred in self.PREDICATES_TO_COPY:
+                self.g.add((new_individual_uri, pred, obj))
+        # # Also clone the type
+        # for obj in self.g.objects(old_individual_uri, rdflib.RDF.type):
+        #     self.g.add((new_individual_uri, rdflib.RDF.type, obj))
 
     def evidence_triples(self):
         evidence_rel = rdflib.URIRef("http://geneontology.org/lego/evidence")
@@ -116,7 +181,12 @@ class GoCamGraph:
         source_id = list(self.g.objects(bnode_id, rdflib.namespace.OWL.annotatedSource))[0]
         target_id = list(self.g.objects(bnode_id, rdflib.namespace.OWL.annotatedTarget))[0]
         relation = list(self.g.objects(bnode_id, rdflib.namespace.OWL.annotatedProperty))[0]
-        return source_id, target_id, relation
+        contributors = list(self.g.objects(bnode_id, rdflib.namespace.DC.contributor))
+        date = next(self.g.objects(bnode_id, rdflib.namespace.DC.date), None)  # optional
+        provided_by = next(self.g.objects(bnode_id, rdflib.URIRef("http://purl.org/pav/providedBy")), None)  # optional
+        created = next(self.g.objects(bnode_id, rdflib.URIRef("http://purl.org/dc/terms/created")), None)  # optional
+        date_accepted = next(self.g.objects(bnode_id, rdflib.URIRef("http://purl.org/dc/terms/dateAccepted")), None)  # optional
+        return source_id, target_id, relation, contributors, date, provided_by, created, date_accepted
 
     def find_axiom_bnode_by_triple(self, source_id, relation, target_id):
         for bnode in self.g.subjects(rdflib.namespace.OWL.annotatedSource, source_id):
@@ -129,10 +199,13 @@ class GoCamGraph:
             bnode = triple[0]
             bnode_id = str(bnode)
 
-            source_id, target_id, relation = self.find_axiom_bits(bnode)
+
             edge = self.get_edge_by_bnode_id(bnode_id)
             if edge is None:
-                edge = StandardAnnotationEdge(bnode, source_id, target_id, relation)
+                source_id, target_id, relation, contributors, date, provided_by, created, date_accepted = self.find_axiom_bits(bnode)
+                edge = StandardAnnotationEdge(bnode, source_id, target_id, relation,
+                                              # contributors, date, provided_by, created, date_accepted
+                                              )
                 self.edges.append(edge)
             evidence_id = triple[2]
             edge.evidence_uris.append(evidence_id)
@@ -278,24 +351,72 @@ class GoCamGraphBuilder:
 if __name__ == "__main__":
     args = parser.parse_args()
 
+    # Load model ID list if provided
+    model_id_filter = None
+    if args.pathway_id_list:
+        with open(args.pathway_id_list, 'r') as f:
+            model_id_filter = set(line.strip() for line in f if line.strip())
+
     model_files = []
     if args.model_filename:
         model_files.append(args.model_filename)
     elif args.models_folder:
         for f in os.listdir(args.models_folder):
             if f.endswith(".ttl"):
-                model_files.append(os.path.join(args.models_folder, f))
+                # If filter is provided, only include models in the filter
+                if model_id_filter is None or f.replace(".ttl", "") in model_id_filter:
+                    model_files.append(os.path.join(args.models_folder, f))
 
     go_cam_graph_builder = GoCamGraphBuilder(args.ontology_filename)
-    headers = ["Model ID", "Title", "Standard Annotations", "Non-Standard Annotations", "Mixed Annotation Type"]
-    print("\t".join(headers))
+
+    # Open report file if specified, otherwise use stdout
+    report_file = None
+    if args.report_file:
+        report_file = open(args.report_file, 'w')
+        output = report_file
+    else:
+        output = sys.stdout
+
+    # Always print statistics header
+    headers = ["Model ID", "Title", "Standard Annotations", "Non-Standard Annotations", "Multi-Evidence Annotations", "Mixed Annotation Type"]
+    print("\t".join(headers), file=output)
+
+    if args.split_evidence and args.output_dir:
+        os.makedirs(args.output_dir, exist_ok=True)
+
     for f in model_files:
         gocam_graph = go_cam_graph_builder.parse_ttl(f)
         filename = os.path.basename(f)
         model_id = filename.split(".")[0]
         sanitized_title = gocam_graph.title.replace("\t", " ").replace("\n", " ")
-        # Print 'Yes' if the graph has a mix of standard annotations and non-standard, otherwise 'No'
+
+        # Print statistics
         mixed_annotation_type = "No"
         if gocam_graph.standard_annotations and gocam_graph.non_standard_annotations:
             mixed_annotation_type = "Yes"
-        print("\t".join(["gomodel:"+model_id, sanitized_title, str(len(gocam_graph.standard_annotations)), str(len(gocam_graph.non_standard_annotations)), mixed_annotation_type]))
+
+        # Count annotations with multiple evidence on at least one edge
+        multi_evidence_count = 0
+        for std_annot in gocam_graph.standard_annotations:
+            for edge in std_annot.edges.values():
+                if len(edge.evidence_uris) > 1:
+                    multi_evidence_count += 1
+                    break  # Count this annotation once, move to next
+
+        print("\t".join(["gomodel:"+model_id, sanitized_title, str(len(gocam_graph.standard_annotations)), str(len(gocam_graph.non_standard_annotations)), str(multi_evidence_count), mixed_annotation_type]), file=output)
+
+        # Split evidence if requested
+        if args.split_evidence:
+            if args.output_dir:
+                output_filename = os.path.join(args.output_dir, filename)
+            else:
+                # Default to same directory with _split suffix
+                base_name = os.path.splitext(f)[0]
+                output_filename = base_name + "_split.ttl"
+
+            gocam_graph.split_evidence_and_write_ttl(output_filename)
+            print(f"Split evidence for {filename} -> {output_filename}")
+
+    # Close report file if it was opened
+    if report_file:
+        report_file.close()
