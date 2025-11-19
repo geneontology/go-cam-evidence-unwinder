@@ -88,14 +88,14 @@ python src/gocam_unwinder/gocam_ttl.py \
   - List of evidence URIs
   - Source and target types (GO terms, etc.)
 
-**GoCamGraphBuilder** (`src/gocam_unwinder/gocam_ttl.py:432-478`)
+**GoCamGraphBuilder** (`src/gocam_unwinder/gocam_ttl.py:455-508`)
 - Factory class that parses GO-CAM models with GO ontology context
 - Uses ontobio's GoAspector to determine if terms are molecular functions
-- Filters out non-standard annotations based on aspect logic (multiple part_of edges from molecular functions)
+- Filters out non-standard annotations based on evidence consistency and structural patterns
 
 ### Key Algorithm: Standard Annotation Extraction
 
-The `extract_standard_annotations()` method (lines 344-403) implements a union-find-like algorithm:
+The `extract_standard_annotations()` method (lines 334-393) implements a union-find-like algorithm:
 
 1. Iterates through all edges with evidence
 2. Tracks which StandardAnnotation each individual URI belongs to via `individual_to_annotation` dict
@@ -105,7 +105,25 @@ The `extract_standard_annotations()` method (lines 344-403) implements a union-f
    - If both are in different annotations: merge annotations
 4. Uses `find_related_edges()` to recursively discover connected edges via GO-CAM relations
 
-This ensures that all edges sharing individuals or transitively connected through the graph are grouped into the same StandardAnnotation.
+The `find_related_edges()` method (lines 396-425) looks up already-extracted edges by bnode ID rather than creating new ones, which preserves the `evidence_uris` that were populated during `extract_edges()`.
+
+This ensures that all edges sharing individuals or transitively connected through the graph are grouped into the same StandardAnnotation with their evidence data intact.
+
+### Standard Annotation Filtering
+
+The `filter_out_non_std_annotations()` method (lines 481-508) applies two filtering criteria:
+
+1. **Evidence Consistency Check** (`has_consistent_evidence_across_edges()`, lines 427-452):
+   - For multi-edge annotations, verifies that all edges have evidence with matching metadata
+   - Uses `group_evidence_by_metadata()` to group evidence across edges
+   - Ensures each evidence group has exactly one evidence from each edge
+   - Single-edge annotations always pass this check
+   - **Passing example**: 2 edges with evidence [A, B] and [C, D], where metadata(A) == metadata(C) and metadata(B) == metadata(D) → 2 evidence groups, each with evidence from both edges
+   - **Failing example**: 2 edges with evidence [A, B] and [C] → evidence group for A has no match from edge 2, inconsistent
+
+2. **Multiple part_of edges from molecular functions**:
+   - Filters out annotations with >1 part_of edge originating from molecular functions
+   - This prevents complex pathway models from being classified as standard annotations
 
 ### Evidence Splitting Logic
 
@@ -148,15 +166,21 @@ This maintains provenance while ensuring one-to-one edge-to-evidence relationshi
 ### Testing
 
 Tests use real GO-CAM model examples in `resources/test/`:
-- **SGD_S000004491.ttl**: Standard yeast gene model (15 evidence triples, 3 edges)
-- **MGI_MGI_1335098.ttl**: Mouse model with occurs_in extensions (34 standard annotations)
-- **MGI_MGI_1100089.ttl**: Mouse Tnfsf11 model with multi-edge multi-evidence annotations (29 standard annotations)
-- **R-HSA-9937080.ttl**: Reactome pathway (should have 0 standard, 1 non-standard)
-- **SYNGO_5371.ttl**: SynGO model (1 standard annotation)
-- **61452e3d00000323.ttl**: Saccharomyces MAL loci model (10 standard annotations)
+- **MGI_MGI_1100089.ttl**: Mouse Tnfsf11 model with multi-edge multi-evidence annotations
+  - **Positive test case**: Has annotations with consistent evidence across edges (passes new filter)
+  - Contains at least one 2-edge annotation where evidence metadata matches across edges
+- **61452e3d00000323.ttl**: Saccharomyces MAL loci model
+  - **Negative test case**: Has annotations with inconsistent evidence across edges (filtered out)
+  - Multi-edge annotations do not have matching evidence metadata
+- **R-HSA-9937080.ttl**: Reactome pathway (0 standard, 1 non-standard)
+- **SYNGO_5371.ttl**: SynGO model (single-edge annotations pass consistency check)
 
 The test requires the GO ontology file at `target/go_20250601.json` (downloaded via Makefile).
 
 **Test Functions:**
-- `test_gocam_ttl()`: Tests basic parsing, annotation extraction, and splitting for multiple models
-- `test_multi_edge_evidence_grouping()`: Tests evidence grouping logic for Issue #6, verifies that evidence with identical metadata across edges is properly grouped when splitting
+- `test_gocam_ttl()`: Tests filtering logic with positive (MGI_MGI_1100089) and negative (61452e3d00000323) test cases for evidence consistency check
+- `test_multi_edge_evidence_grouping()`: Tests evidence grouping logic for Issue #6, verifies that:
+  - Evidence with identical metadata across edges is grouped correctly
+  - Splitting creates one annotation per evidence group
+  - Each split annotation maintains 2-edge structure with 1 evidence per edge
+  - All split annotations pass the evidence consistency check
