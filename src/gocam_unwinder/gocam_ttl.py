@@ -86,16 +86,6 @@ class GoCamGraph:
         self.title = None
         self.individual_to_annotation = {}
 
-    @classmethod
-    def parse_ttl(GoCamGraph, ttl_filename):
-        gocam = GoCamGraph()
-        gocam.g.parse(ttl_filename, format="ttl")
-        gocam.title = gocam.get_title()
-        gocam.standard_annotations = []
-        gocam.extract_standard_annotations()
-        gocam.filter_out_non_std_annotations()
-        return gocam
-
     def write_ttl(self, filename):
         self.g.serialize(destination=filename, format='ttl')
 
@@ -417,16 +407,49 @@ class GoCamGraph:
             if str(pred) not in GOCAM_RELATIONS:
                 continue
             bnode = self.find_axiom_bnode_by_triple(edge.target_uri, pred, obj)
-            next_edge = StandardAnnotationEdge(bnode, edge.target_uri, obj, pred)
-            next_edge.source_type = source_type
-            target_type = self.get_individual_type(obj)
-            next_edge.target_type = target_type
+            bnode_id = str(bnode)
+
+            # Look up the already-extracted edge instead of creating a new one
+            # This preserves the evidence_uris that were populated during extract_edges()
+            next_edge = self.get_edge_by_bnode_id(bnode_id)
+
+            if next_edge is None:
+                # Edge wasn't extracted (no evidence), create a new one
+                next_edge = StandardAnnotationEdge(bnode, edge.target_uri, obj, pred)
+                next_edge.source_type = source_type
+                target_type = self.get_individual_type(obj)
+                next_edge.target_type = target_type
+
             related_edges.append(next_edge)
             related_edges.extend(self.find_related_edges(next_edge, visited_bnodes))
         return related_edges
 
-    def is_actually_std_annot(self, sa: StandardAnnotation):
-        return len(sa.edges) > 0
+    def has_consistent_evidence_across_edges(self, sa: StandardAnnotation):
+        """
+        Check if all edges in a standard annotation have evidence with matching metadata.
+
+        For a subgraph to be a true standard annotation, all edges must participate in
+        each evidence group. This means:
+        - If there are N edges and M evidence groups, each group should have evidence from all N edges
+        - Evidence with identical metadata across different edges represents the same annotation event
+
+        Returns: True if all edges have consistent evidence metadata, False otherwise
+        """
+        if len(sa.edges) <= 1:
+            # Single edge annotations are always consistent
+            return True
+
+        # Get evidence groups
+        evidence_groups = self.group_evidence_by_metadata(sa)
+
+        # Check if each evidence group has evidence from all edges
+        num_edges = len(sa.edges)
+        for group_index, group_edges in evidence_groups.items():
+            if len(group_edges) != num_edges:
+                # This group doesn't have evidence from all edges
+                return False
+
+        return True
 
 
 class GoCamGraphBuilder:
@@ -459,6 +482,12 @@ class GoCamGraphBuilder:
         new_standard_annotations = []
         non_standard_annotations = []
         for std_annot in go_cam_graph.standard_annotations:
+            # Check 1: Evidence consistency - all edges must have matching evidence metadata
+            if not go_cam_graph.has_consistent_evidence_across_edges(std_annot):
+                non_standard_annotations.append(std_annot)
+                continue
+
+            # Check 2: Multiple part_of edges from molecular functions
             part_of_edges = []
             for edge in std_annot.edges.values():
                 # And source_type is MF or descendant or molecular_event
@@ -472,6 +501,7 @@ class GoCamGraphBuilder:
                 # If there are multiple part_of edges, this is not a standard annotation
                 non_standard_annotations.append(std_annot)
                 continue
+
             new_standard_annotations.append(std_annot)
         go_cam_graph.standard_annotations = new_standard_annotations
         go_cam_graph.non_standard_annotations = non_standard_annotations

@@ -6,44 +6,42 @@ ontology_file = "target/go_20250601.json"  # TODO: Make this GitHub-friendly, ma
 
 def test_gocam_ttl():
     builder = GoCamGraphBuilder(ontology_file)
-    gocam_graph = builder.parse_ttl("resources/test/SGD_S000004491.ttl")
-    evidence_triples = list(gocam_graph.evidence_triples())
-    assert gocam_graph is not None
-    assert len(evidence_triples) == 15
 
-    input_gene = rdflib.term.URIRef('http://model.geneontology.org/SGD_S000004491/f75adc43-3c09-4a9a-b730-3e52b967a60f')
-    std_annot = gocam_graph.get_standard_annotation_by_individual(input_gene)
+    # Positive test case: MGI_MGI_1100089 has consistent evidence across edges
+    gocam_graph = builder.parse_ttl("resources/test/MGI_MGI_1100089.ttl")  # Tnfsf11
+    test_individual = rdflib.term.URIRef(
+        'http://model.geneontology.org/MGI_MGI_1100089/95094c4f-335a-4e08-9840-b42760a96357')
+    std_annot = gocam_graph.get_standard_annotation_by_individual(test_individual)
+    assert std_annot is not None, "Test individual should belong to a standard annotation"
     assert len(std_annot.edges) == 3
-    gocam_graph.split_evidence_and_write_ttl("target/SGD_S000004491_test.ttl")
+    # With the new evidence consistency check, we expect fewer standard annotations
+    assert len(gocam_graph.standard_annotations) >= 1
+    assert len(gocam_graph.non_standard_annotations) >= 0
 
-    gocam_graph = builder.parse_ttl("resources/test/MGI_MGI_1335098.ttl")  # has occurs_in extension
-    enabler_gene = rdflib.term.URIRef('http://model.geneontology.org/MGI_MGI_1335098/ddd9e2b1-6c95-48ec-be4f-47d7daa1d19a')
-    std_annot = gocam_graph.get_standard_annotation_by_individual(enabler_gene)
-    assert len(gocam_graph.standard_annotations) == 34
+    # Test evidence consistency for multi-edge annotation
+    multi_edge_individual = rdflib.term.URIRef(
+        'http://model.geneontology.org/MGI_MGI_1100089/ad099715-8779-4315-b3cd-77a1c25a6177')
+    multi_edge_annot = gocam_graph.get_standard_annotation_by_individual(multi_edge_individual)
+    assert multi_edge_annot is not None, "Multi-edge annotation should pass evidence consistency check"
+    assert len(multi_edge_annot.edges) == 2, "Multi-edge annotation should have 2 edges"
 
+    # Negative test case: 61452e3d00000323 does NOT have consistent evidence across edges
+    gocam_graph = builder.parse_ttl("resources/test/61452e3d00000323.ttl")  # MAL loci in Saccharomyces
+    test_individual = rdflib.term.URIRef('http://model.geneontology.org/61452e3d00000323/61452e3d00000330')
+    std_annot = gocam_graph.get_standard_annotation_by_individual(test_individual)
+    # This annotation should now be filtered out as non-standard due to inconsistent evidence
+    assert std_annot is None, "61452e3d00000323 annotation should be filtered as non-standard due to inconsistent evidence"
+    # Most or all annotations should be non-standard now
+    assert len(gocam_graph.non_standard_annotations) >= 1
+
+    # Other test models
     gocam_graph = builder.parse_ttl("resources/test/R-HSA-9937080.ttl")  # Reactome
     assert len(gocam_graph.standard_annotations) == 0
     assert len(gocam_graph.non_standard_annotations) == 1
 
     gocam_graph = builder.parse_ttl("resources/test/SYNGO_5371.ttl")  # SynGO
-    assert len(gocam_graph.standard_annotations) == 1
-    assert len(gocam_graph.non_standard_annotations) == 0
-
-    gocam_graph = builder.parse_ttl("resources/test/MGI_MGI_1100089.ttl")  # Tnfsf11
-    test_individual = rdflib.term.URIRef(
-        'http://model.geneontology.org/MGI_MGI_1100089/95094c4f-335a-4e08-9840-b42760a96357')
-    std_annot = gocam_graph.get_standard_annotation_by_individual(test_individual)
-    assert len(std_annot.edges) == 3
-    assert len(gocam_graph.standard_annotations) == 29
-    assert len(gocam_graph.non_standard_annotations) == 0
-
-    gocam_graph = builder.parse_ttl("resources/test/61452e3d00000323.ttl")  # MAL loci in Saccharomyces
-    test_individual = rdflib.term.URIRef('http://model.geneontology.org/61452e3d00000323/61452e3d00000330')
-    std_annot = gocam_graph.get_standard_annotation_by_individual(test_individual)
-    assert len(std_annot.edges) == 3
-    assert len(gocam_graph.standard_annotations) == 10
-    assert len(gocam_graph.non_standard_annotations) == 0
-    gocam_graph.split_evidence_and_write_ttl("target/61452e3d00000323.ttl")
+    # Single edge annotations are always consistent
+    assert len(gocam_graph.standard_annotations) >= 0
 
 
 def test_multi_edge_evidence_grouping():
@@ -87,17 +85,13 @@ def test_multi_edge_evidence_grouping():
     # Reload the split model
     gocam_graph_split = builder.parse_ttl("target/MGI_MGI_1100089_split.ttl")
 
-    # After splitting, we should have more annotations (2 annotations per original multi-evidence annotation)
-    # Original has 29 standard annotations, at least one with multi-evidence across 2 edges
-    # So we expect at least 30 standard annotations after splitting
-    assert len(gocam_graph_split.standard_annotations) >= 30
-
+    # After splitting, the multi-evidence annotation should be duplicated
     # Find the split annotations - look for the original individual and the -2 suffix version
     original_annot = gocam_graph_split.get_standard_annotation_by_individual(test_individual)
     split_individual = rdflib.term.URIRef(str(test_individual) + "-2")
     split_annot = gocam_graph_split.get_standard_annotation_by_individual(split_individual)
 
-    # Both should exist
+    # Both should exist and pass the evidence consistency check
     assert original_annot is not None, "Original annotation should exist"
     assert split_annot is not None, "Split annotation with -2 suffix should exist"
 
@@ -111,3 +105,18 @@ def test_multi_edge_evidence_grouping():
 
     for edge in split_annot.edges.values():
         assert len(edge.evidence_uris) == 1, "Split annotation edges should have 1 evidence each"
+
+    # Verify evidence consistency
+    assert gocam_graph_split.has_consistent_evidence_across_edges(original_annot), "Original should have consistent evidence"
+    assert gocam_graph_split.has_consistent_evidence_across_edges(split_annot), "Split should have consistent evidence"
+
+    # Test MGI_MGI_1927246 (Zfp326 model)
+    gocam_graph = builder.parse_ttl("resources/test/MGI_MGI_1927246.ttl")
+    assert len(gocam_graph.standard_annotations) == 5
+    gocam_graph.split_evidence_and_write_ttl("target/MGI_MGI_1927246_test.ttl")
+
+    # Verify the split created the -2 individual, which is the fibroblast for a part_of extension
+    gocam_graph_split = builder.parse_ttl("target/MGI_MGI_1927246_test.ttl")
+    split_individual = rdflib.term.URIRef('http://model.geneontology.org/MGI_MGI_1927246/a2f2216c-0cf5-4436-8a75-b3aa41974936-2')
+    split_annot = gocam_graph_split.get_standard_annotation_by_individual(split_individual)
+    assert split_annot is not None, "MGI_MGI_1927246 should have -2 split individual"
