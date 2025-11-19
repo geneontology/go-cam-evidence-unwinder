@@ -99,29 +99,159 @@ class GoCamGraph:
     def write_ttl(self, filename):
         self.g.serialize(destination=filename, format='ttl')
 
-    def split_evidence_and_write_ttl(self, filename):
-        # new_graph = rdflib.Graph()
-        for std_annot in self.standard_annotations:
+    def get_evidence_metadata(self, evidence_uri):
+        """
+        Extract metadata for an evidence individual as a hashable tuple.
+        This creates a signature that can identify equivalent evidence across edges.
+        """
+        metadata = []
+
+        # Collect predicates defined in PREDICATES_TO_COPY
+        for pred in self.PREDICATES_TO_COPY:
+            values = sorted([str(obj) for obj in self.g.objects(evidence_uri, pred)])
+            if values:
+                metadata.append((str(pred), tuple(values)))
+
+        # Also include evidence-with predicate
+        evidence_with_pred = rdflib.URIRef("http://geneontology.org/lego/evidence-with")
+        values = sorted([str(obj) for obj in self.g.objects(evidence_uri, evidence_with_pred)])
+        if values:
+            metadata.append((str(evidence_with_pred), tuple(values)))
+
+        # Include source predicate
+        source_pred = rdflib.DC.source
+        values = sorted([str(obj) for obj in self.g.objects(evidence_uri, source_pred)])
+        if values:
+            metadata.append((str(source_pred), tuple(values)))
+
+        return tuple(sorted(metadata))
+
+    def group_evidence_by_metadata(self, std_annot: StandardAnnotation):
+        """
+        Group evidence URIs across all edges in a standard annotation by their metadata.
+
+        For MOD imports, evidence on different edges often share identical metadata
+        (dates, contributors, sources). These represent the same "evidence event" and
+        should be grouped together when splitting.
+
+        Returns: dict mapping group_index -> dict of edge_bnode_id -> list of evidence_uris
+
+        Example:
+        If Edge1 has evidence [A, B] and Edge2 has evidence [C, D],
+        and metadata(A) == metadata(C) and metadata(B) == metadata(D),
+        returns: {
+            0: {edge1_id: [A], edge2_id: [C]},
+            1: {edge1_id: [B], edge2_id: [D]}
+        }
+        """
+        # Collect all evidence URIs and their metadata signatures
+        evidence_to_metadata = {}
+        for edge in std_annot.edges.values():
+            for evidence_uri in edge.evidence_uris:
+                if evidence_uri not in evidence_to_metadata:
+                    evidence_to_metadata[evidence_uri] = self.get_evidence_metadata(evidence_uri)
+
+        # Group evidence URIs by their metadata signature
+        metadata_to_evidence = {}
+        for evidence_uri, metadata in evidence_to_metadata.items():
+            if metadata not in metadata_to_evidence:
+                metadata_to_evidence[metadata] = []
+            metadata_to_evidence[metadata].append(evidence_uri)
+
+        # Build groups: for each metadata signature, find which evidence from each edge belongs to it
+        groups = {}
+        group_index = 0
+        for metadata_sig, evidence_list in metadata_to_evidence.items():
+            evidence_set = set(evidence_list)
+            group = {}
+
             for edge in std_annot.edges.values():
-                counter = 1
-                for evidence_uri in sorted(edge.evidence_uris, key=lambda x: str(x)):
-                    if counter > 1:
-                        # Create a new bnode for each evidence URI
-                        new_bnode = rdflib.term.BNode(edge.bnode_id + "-" + str(counter))
-                        # self.g.add((new_bnode, rdflib.RDF.type, rdflib.namespace.OWL.Axiom))
-                        self.clone_bnode(rdflib.term.BNode(edge.bnode_id), new_bnode)
-                        new_source_uri = rdflib.URIRef(str(edge.source_uri)+"-"+str(counter))
-                        new_target_uri = rdflib.URIRef(str(edge.target_uri)+"-"+str(counter))
+                # Find evidence from this edge that belongs to this metadata group
+                edge_evidence_in_group = [ev for ev in edge.evidence_uris if ev in evidence_set]
+                if edge_evidence_in_group:
+                    group[edge.bnode_id] = edge_evidence_in_group
+
+            if group:
+                groups[group_index] = group
+                group_index += 1
+
+        return groups
+
+    def split_evidence_and_write_ttl(self, filename):
+        """
+        Split multi-evidence edges by grouping evidence with identical metadata across edges.
+
+        For each standard annotation:
+        1. Group evidence by metadata signature (date, contributor, source, etc.)
+        2. For each evidence group, create a new annotation subgraph
+        3. First group keeps original nodes; subsequent groups get new nodes with suffix
+
+        This ensures that evidence representing the same "evidence event" across
+        different edges stays together in the split annotations.
+        """
+        evidence_pred = rdflib.URIRef("http://geneontology.org/lego/evidence")
+
+        for std_annot in self.standard_annotations:
+            # Get evidence groups for this annotation
+            evidence_groups = self.group_evidence_by_metadata(std_annot)
+
+            # Track which individuals have been created for each group
+            # Map: (original_uri, group_suffix) -> new_uri
+            individual_mapping = {}
+
+            # Process each evidence group
+            for group_index, group_edges in sorted(evidence_groups.items()):
+                # Determine suffix for this group (first group uses original nodes)
+                if group_index == 0:
+                    suffix = ""
+                else:
+                    suffix = f"-{group_index + 1}"
+
+                # Process each edge in this group
+                for edge_bnode_id, evidence_uris in group_edges.items():
+                    edge = std_annot.edges[edge_bnode_id]
+
+                    if suffix == "":
+                        # First group: keep original bnode, but remove extra evidence
+                        original_bnode = rdflib.term.BNode(edge.bnode_id)
+                        # Remove all evidence except those in this group
+                        for ev_uri in edge.evidence_uris:
+                            if ev_uri not in evidence_uris:
+                                self.g.remove((original_bnode, evidence_pred, ev_uri))
+                    else:
+                        # Subsequent groups: create new bnode and individuals
+                        new_bnode = rdflib.term.BNode(edge.bnode_id + suffix)
+                        original_bnode = rdflib.term.BNode(edge.bnode_id)
+
+                        # Clone bnode metadata
+                        self.clone_bnode(original_bnode, new_bnode)
+
+                        # Get or create new individual URIs for source and target
+                        source_key = (str(edge.source_uri), suffix)
+                        if source_key not in individual_mapping:
+                            new_source_uri = rdflib.URIRef(str(edge.source_uri) + suffix)
+                            individual_mapping[source_key] = new_source_uri
+                            self.clone_individual(edge.source_uri, new_source_uri)
+                        else:
+                            new_source_uri = individual_mapping[source_key]
+
+                        target_key = (str(edge.target_uri), suffix)
+                        if target_key not in individual_mapping:
+                            new_target_uri = rdflib.URIRef(str(edge.target_uri) + suffix)
+                            individual_mapping[target_key] = new_target_uri
+                            self.clone_individual(edge.target_uri, new_target_uri)
+                        else:
+                            new_target_uri = individual_mapping[target_key]
+
+                        # Add the axiom triples
                         self.g.add((new_bnode, rdflib.namespace.OWL.annotatedSource, new_source_uri))
                         self.g.add((new_bnode, rdflib.namespace.OWL.annotatedTarget, new_target_uri))
                         self.g.add((new_bnode, rdflib.namespace.OWL.annotatedProperty, edge.property_uri))
-                        self.g.add((new_bnode, rdflib.URIRef("http://geneontology.org/lego/evidence"), evidence_uri))
-                        self.g.remove((rdflib.term.BNode(edge.bnode_id), rdflib.URIRef("http://geneontology.org/lego/evidence"), evidence_uri))
 
-                        # Add types for source and target
-                        self.clone_individual(edge.source_uri, new_source_uri)
-                        self.clone_individual(edge.target_uri, new_target_uri)
-                    counter += 1
+                        # Add only the evidence for this group
+                        for evidence_uri in evidence_uris:
+                            self.g.add((new_bnode, evidence_pred, evidence_uri))
+
         self.write_ttl(filename)
 
     def clone_bnode(self, old_bnode: rdflib.term.BNode, new_bnode: rdflib.term.BNode):
