@@ -125,6 +125,11 @@ The `filter_out_non_std_annotations()` method (lines 481-508) applies two filter
    - Filters out annotations with >1 part_of edge originating from molecular functions
    - This prevents complex pathway models from being classified as standard annotations
 
+3. **Causal relation edges between two molecular function nodes** (requires RO ontology):
+   - If an RO ontology file is provided, filters out annotations containing causal relation edges (descendants of RO:0002418 "causally upstream of or within") where both source and target are molecular functions
+   - Causal relations include: directly positively regulates (RO:0002629), directly negatively regulates (RO:0002630), etc.
+   - This prevents MF-to-MF causal chains from being classified as standard annotations
+
 ### Evidence Splitting Logic
 
 The evidence splitting process now groups evidence by metadata to handle multi-edge annotations correctly (Issue #6):
@@ -174,8 +179,11 @@ Tests use real GO-CAM model examples in `resources/test/`:
   - Multi-edge annotations do not have matching evidence metadata
 - **R-HSA-9937080.ttl**: Reactome pathway (0 standard, 1 non-standard)
 - **SYNGO_5371.ttl**: SynGO model (single-edge annotations pass consistency check)
+- **5b318d0900000481.ttl**: Human kinase activation template model with MF-to-MF causal edges
+  - Contains GO:0004672 (protein kinase activity) → RO:0002629 (directly positively regulates) → GO:0003700 (DNA-binding transcription factor activity)
+  - Used to test MF-causal->MF filtering when RO ontology is provided
 
-The test requires the GO ontology file at `target/go_20250601.json` (downloaded via Makefile).
+The test requires the GO ontology file at `target/go_20250601.json` (downloaded via Makefile). The MF-causal->MF test also requires `resources/test/ro_20250723.owl`.
 
 **Test Functions:**
 - `test_gocam_ttl()`: Tests filtering logic with positive (MGI_MGI_1100089) and negative (61452e3d00000323) test cases for evidence consistency check
@@ -184,3 +192,8 @@ The test requires the GO ontology file at `target/go_20250601.json` (downloaded 
   - Splitting creates one annotation per evidence group
   - Each split annotation maintains 2-edge structure with 1 evidence per edge
   - All split annotations pass the evidence consistency check
+- `test_mf_causal_mf_filtering()`: Tests MF-to-MF causal relation filtering, verifies that:
+  - RO causal relations are loaded from the RO ontology
+  - RO:0002629 (directly positively regulates) is recognized as a causal relation
+  - Annotations with MF-causal->MF edges are filtered out as non-standard
+  - Filtering only applies when RO ontology is provided

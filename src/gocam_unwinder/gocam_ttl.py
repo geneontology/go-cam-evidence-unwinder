@@ -14,11 +14,51 @@ parser.add_argument('-m', '--model_filename', help="Single GO-CAM model file to 
 parser.add_argument('-d', '--models_folder', help="Directory containing GO-CAM model files")
 parser.add_argument('-l', '--pathway_id_list', help="File containing list of model IDs (one per line) to filter processing")
 parser.add_argument('-o', '--ontology_filename', help="GO ontology filename (JSON format)")
+parser.add_argument('-r', '--ro_filename', help="RO ontology filename (OWL format) for causal relation hierarchy")
 parser.add_argument('--split-evidence', action='store_true', help="Split multi-evidence edges into separate edges")
 parser.add_argument('--output-dir', help="Output directory for split evidence files")
 parser.add_argument('--report-file', help="Output file for statistics report (TSV format). If not specified, output goes to stdout.")
 
 GOCAM_RELATIONS = [str(r) for r in relations.__relation_label_lookup.values()]
+
+
+def get_relation_descendants(ro_owl_path: str, root_relation_uri: str) -> set:
+    """
+    Parse an RO ontology file and extract all descendants of a given relation.
+
+    Uses rdfs:subPropertyOf to traverse the relation hierarchy and find all
+    relations that are descendants of the specified root relation.
+
+    Args:
+        ro_owl_path: Path to the ro.owl file
+        root_relation_uri: URI of the root relation to find descendants of
+
+    Returns:
+        Set of URIs (as strings) including the root and all its descendants
+    """
+    from collections import deque
+
+    g = rdflib.Graph()
+    g.parse(ro_owl_path, format="xml")
+
+    root_uri = rdflib.URIRef(root_relation_uri)
+    subprop_of = rdflib.RDFS.subPropertyOf
+
+    # Include the root itself
+    descendants = {root_relation_uri}
+
+    # BFS to find all descendants
+    queue = deque([root_uri])
+    while queue:
+        current = queue.popleft()
+        # Find all properties that have current as their superProperty
+        for child in g.subjects(subprop_of, current):
+            child_str = str(child)
+            if child_str not in descendants:
+                descendants.add(child_str)
+                queue.append(child)
+
+    return descendants
 
 
 class StandardAnnotationEdge:
@@ -83,6 +123,7 @@ class GoCamGraph:
         self.edges = []
         self.standard_annotations = []
         self.non_standard_annotations = []
+        self.model_id = None
         self.title = None
         self.individual_to_annotation = {}
 
@@ -293,9 +334,13 @@ class GoCamGraph:
             if e.bnode_id == bnode_id:
                 return e
 
+    def get_model_id(self):
+        for model_id in self.g.subjects(rdflib.namespace.RDF.type, rdflib.namespace.OWL.Ontology):
+            return str(model_id)
+
     def get_title(self):
         for title in self.g.objects(None, rdflib.DC.title):
-            return title
+            return title.replace("\t", " ").replace("\n", " ")
 
     def find_axiom_bits(self, bnode_id):
         source_id = list(self.g.objects(bnode_id, rdflib.namespace.OWL.annotatedSource))[0]
@@ -318,7 +363,6 @@ class GoCamGraph:
         for triple in ets:
             bnode = triple[0]
             bnode_id = str(bnode)
-
 
             edge = self.get_edge_by_bnode_id(bnode_id)
             if edge is None:
@@ -453,9 +497,24 @@ class GoCamGraph:
 
 
 class GoCamGraphBuilder:
-    def __init__(self, ontology):
+    # URI for the root causal relation
+    CAUSALLY_UPSTREAM_OF_OR_WITHIN = "http://purl.obolibrary.org/obo/RO_0002418"
+
+    def __init__(self, ontology, ro_ontology=None):
         parsed_ontology = ontobio.ontol_factory.OntologyFactory().create(ontology)
         self.go_aspector = ontobio.util.go_utils.GoAspector(parsed_ontology)
+
+        # Load causal relations from RO ontology if provided
+        if ro_ontology:
+            self.causal_relations = get_relation_descendants(ro_ontology, self.CAUSALLY_UPSTREAM_OF_OR_WITHIN)
+        else:
+            self.causal_relations = set()
+
+    def uri_is_causal_relation(self, uri: URIRef) -> bool:
+        """
+        Check if the URI refers to a causal relation (descendant of causally_upstream_of_or_within).
+        """
+        return str(uri) in self.causal_relations
 
     def uri_is_molecular_function(self, uri: URIRef):
         """
@@ -472,6 +531,7 @@ class GoCamGraphBuilder:
     def parse_ttl(self, ttl_filename):
         gocam = GoCamGraph()
         gocam.g.parse(ttl_filename, format="ttl")
+        gocam.model_id = gocam.get_model_id()
         gocam.title = gocam.get_title()
         gocam.standard_annotations = []
         gocam.extract_standard_annotations()
@@ -502,6 +562,25 @@ class GoCamGraphBuilder:
                 non_standard_annotations.append(std_annot)
                 continue
 
+            # Check 3: Causal relation edge between two molecular function nodes
+            # If RO ontology was provided and causal relations were loaded
+            if self.causal_relations:
+                has_mf_to_mf_causal = False
+                for edge in std_annot.edges.values():
+                    if (self.uri_is_causal_relation(edge.property_uri) and
+                            self.uri_is_molecular_function(edge.source_type) and
+                            self.uri_is_molecular_function(edge.target_type)):
+                        has_mf_to_mf_causal = True
+                        source_curie = curie_util.contract_uri(str(edge.source_type))[0]
+                        prop_curie = curie_util.contract_uri(str(edge.property_uri))[0]
+                        target_curie = curie_util.contract_uri(str(edge.target_type))[0]
+                        causal_disqualification_report_cols = ["MF-causal->MF edge disqualifies", go_cam_graph.model_id, str(source_curie), str(prop_curie), str(target_curie)]
+                        print("\t".join(causal_disqualification_report_cols))
+                        break
+                if has_mf_to_mf_causal:
+                    non_standard_annotations.append(std_annot)
+                    continue
+
             new_standard_annotations.append(std_annot)
         go_cam_graph.standard_annotations = new_standard_annotations
         go_cam_graph.non_standard_annotations = non_standard_annotations
@@ -527,7 +606,7 @@ if __name__ == "__main__":
                 if model_id_filter is None or f.replace(".ttl", "") in model_id_filter:
                     model_files.append(os.path.join(args.models_folder, f))
 
-    go_cam_graph_builder = GoCamGraphBuilder(args.ontology_filename)
+    go_cam_graph_builder = GoCamGraphBuilder(args.ontology_filename, args.ro_filename)
 
     # Open report file if specified, otherwise use stdout
     report_file = None
@@ -548,7 +627,6 @@ if __name__ == "__main__":
         gocam_graph = go_cam_graph_builder.parse_ttl(f)
         filename = os.path.basename(f)
         model_id = filename.split(".")[0]
-        sanitized_title = gocam_graph.title.replace("\t", " ").replace("\n", " ")
 
         # Print statistics
         mixed_annotation_type = "No"
@@ -563,10 +641,10 @@ if __name__ == "__main__":
                     multi_evidence_count += 1
                     break  # Count this annotation once, move to next
 
-        print("\t".join(["gomodel:"+model_id, sanitized_title, str(len(gocam_graph.standard_annotations)), str(len(gocam_graph.non_standard_annotations)), str(multi_evidence_count), mixed_annotation_type]), file=output)
+        print("\t".join(["gomodel:"+model_id, gocam_graph.title, str(len(gocam_graph.standard_annotations)), str(len(gocam_graph.non_standard_annotations)), str(multi_evidence_count), mixed_annotation_type]), file=output)
 
         # Split evidence if requested
-        if args.split_evidence:
+        if args.split_evidence and multi_evidence_count >= 1:
             if args.output_dir:
                 output_filename = os.path.join(args.output_dir, filename)
             else:
