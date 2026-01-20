@@ -18,28 +18,28 @@ parser.add_argument('-r', '--ro_filename', help="RO ontology filename (OWL forma
 parser.add_argument('--split-evidence', action='store_true', help="Split multi-evidence edges into separate edges")
 parser.add_argument('--output-dir', help="Output directory for split evidence files")
 parser.add_argument('--report-file', help="Output file for statistics report (TSV format). If not specified, output goes to stdout.")
+parser.add_argument('--criteria-fail-report', help="Output file for standard annotation criteria failure report (TSV format).")
+parser.add_argument('--skip-prefix', action='append', dest='skip_prefixes', metavar='PREFIX',
+                    help="Skip files starting with PREFIX (can be specified multiple times, e.g., --skip-prefix SYNGO --skip-prefix R-HSA)")
 
 GOCAM_RELATIONS = [str(r) for r in relations.__relation_label_lookup.values()]
 
 
-def get_relation_descendants(ro_owl_path: str, root_relation_uri: str) -> set:
+def get_relation_descendants(ro_graph: rdflib.Graph, root_relation_uri: str) -> set:
     """
-    Parse an RO ontology file and extract all descendants of a given relation.
+    Extract all descendants of a given relation from an RO ontology graph.
 
     Uses rdfs:subPropertyOf to traverse the relation hierarchy and find all
     relations that are descendants of the specified root relation.
 
     Args:
-        ro_owl_path: Path to the ro.owl file
+        ro_graph: Parsed RO ontology as an rdflib.Graph
         root_relation_uri: URI of the root relation to find descendants of
 
     Returns:
         Set of URIs (as strings) including the root and all its descendants
     """
     from collections import deque
-
-    g = rdflib.Graph()
-    g.parse(ro_owl_path, format="xml")
 
     root_uri = rdflib.URIRef(root_relation_uri)
     subprop_of = rdflib.RDFS.subPropertyOf
@@ -52,7 +52,7 @@ def get_relation_descendants(ro_owl_path: str, root_relation_uri: str) -> set:
     while queue:
         current = queue.popleft()
         # Find all properties that have current as their superProperty
-        for child in g.subjects(subprop_of, current):
+        for child in ro_graph.subjects(subprop_of, current):
             child_str = str(child)
             if child_str not in descendants:
                 descendants.add(child_str)
@@ -86,6 +86,7 @@ class StandardAnnotation:
     def __init__(self):
         self.edges = {}  # keyed by bnodeID
         self.individuals = set()
+        self.failed_checks = None
 
     def add_edge(self, edge: StandardAnnotationEdge):
         self.edges[edge.bnode_id] = edge
@@ -500,13 +501,17 @@ class GoCamGraphBuilder:
     # URI for the root causal relation
     CAUSALLY_UPSTREAM_OF_OR_WITHIN = "http://purl.obolibrary.org/obo/RO_0002418"
 
-    def __init__(self, ontology, ro_ontology=None):
-        parsed_ontology = ontobio.ontol_factory.OntologyFactory().create(ontology)
-        self.go_aspector = ontobio.util.go_utils.GoAspector(parsed_ontology)
+    def __init__(self, ontology_path, ro_ontology_path=None):
+        # Store and parse the GO ontology
+        self.ontology = ontobio.ontol_factory.OntologyFactory().create(ontology_path)
+        self.go_aspector = ontobio.util.go_utils.GoAspector(self.ontology)
 
-        # Load causal relations from RO ontology if provided
-        if ro_ontology:
-            self.causal_relations = get_relation_descendants(ro_ontology, self.CAUSALLY_UPSTREAM_OF_OR_WITHIN)
+        # Store and parse the RO ontology if provided
+        self.ro_ontology = None
+        if ro_ontology_path:
+            self.ro_ontology = rdflib.Graph()
+            self.ro_ontology.parse(ro_ontology_path, format="xml")
+            self.causal_relations = get_relation_descendants(self.ro_ontology, self.CAUSALLY_UPSTREAM_OF_OR_WITHIN)
         else:
             self.causal_relations = set()
 
@@ -541,50 +546,99 @@ class GoCamGraphBuilder:
     def filter_out_non_std_annotations(self, go_cam_graph: GoCamGraph):
         new_standard_annotations = []
         non_standard_annotations = []
+
         for std_annot in go_cam_graph.standard_annotations:
+            failed_checks = {}
+
             # Check 1: Evidence consistency - all edges must have matching evidence metadata
             if not go_cam_graph.has_consistent_evidence_across_edges(std_annot):
-                non_standard_annotations.append(std_annot)
-                continue
+                failed_checks["inconsistent_evidence"] = set()
+                # Every edge gets this failure
+                for edge_bnode_id in std_annot.edges.keys():
+                    failed_checks["inconsistent_evidence"].add(edge_bnode_id)
 
             # Check 2: Multiple part_of edges from molecular functions
             part_of_edges = []
             for edge in std_annot.edges.values():
-                # And source_type is MF or descendant or molecular_event
-                # source_is_mf = False
-                # source_curie = str(curie_util.contract_uri(str(edge.source_type)))
-                # if source_curie.startswith("GO:"):
-                #     source_is_mf = self.go_aspector.is_molecular_function(source_curie)
                 if edge.property_uri == URIRef(relations.lookup_label("part of")) and self.uri_is_molecular_function(edge.source_type):
                     part_of_edges.append(edge)
             if len(part_of_edges) > 1:
-                # If there are multiple part_of edges, this is not a standard annotation
-                non_standard_annotations.append(std_annot)
-                continue
+                failed_checks["multiple_mf_part_of"] = set([part_of_edge.bnode_id for part_of_edge in part_of_edges])
 
             # Check 3: Causal relation edge between two molecular function nodes
             # If RO ontology was provided and causal relations were loaded
             if self.causal_relations:
-                has_mf_to_mf_causal = False
                 for edge in std_annot.edges.values():
                     if (self.uri_is_causal_relation(edge.property_uri) and
                             self.uri_is_molecular_function(edge.source_type) and
                             self.uri_is_molecular_function(edge.target_type)):
-                        has_mf_to_mf_causal = True
-                        source_curie = curie_util.contract_uri(str(edge.source_type))[0]
-                        prop_curie = curie_util.contract_uri(str(edge.property_uri))[0]
-                        target_curie = curie_util.contract_uri(str(edge.target_type))[0]
-                        causal_disqualification_report_cols = ["MF-causal->MF edge disqualifies", go_cam_graph.model_id, str(source_curie), str(prop_curie), str(target_curie)]
-                        print("\t".join(causal_disqualification_report_cols))
-                        break
-                if has_mf_to_mf_causal:
-                    non_standard_annotations.append(std_annot)
-                    continue
+                        # Uh oh, start reporting the failure
+                        if "mf_causal_mf" not in failed_checks:
+                            failed_checks["mf_causal_mf"] = set()
+                        failed_checks["mf_causal_mf"].add(edge.bnode_id)
 
-            new_standard_annotations.append(std_annot)
+            std_annot.failed_checks = failed_checks
+
+            # Categorize annotation
+            if failed_checks:
+                non_standard_annotations.append(std_annot)
+            else:
+                new_standard_annotations.append(std_annot)
+
         go_cam_graph.standard_annotations = new_standard_annotations
         go_cam_graph.non_standard_annotations = non_standard_annotations
         return go_cam_graph
+
+    def term_label(self, uri: URIRef) -> str:
+        """
+        Look up the label for a term URI using the stored ontologies.
+
+        For GO terms, uses the GO ontology. For RO terms, uses the RO ontology.
+        Returns the CURIE if no label is found.
+        """
+        parsed_curies = curie_util.contract_uri(str(uri))
+        if not parsed_curies:
+            return str(uri)
+
+        curie = parsed_curies[0]
+
+        # Try GO ontology for GO terms
+        if curie.startswith("GO:"):
+            label = self.ontology.label(curie)
+            if label:
+                return label
+
+        # Try RO ontology for RO terms
+        if self.ro_ontology and (curie.startswith("RO:") or curie.startswith("BFO:")):
+            # Look up rdfs:label in the RO graph
+            for label in self.ro_ontology.objects(uri, rdflib.RDFS.label):
+                return str(label)
+
+        # Fall back to CURIE
+        return str(curie)
+
+    def print_non_standard_annotation_failed_checks(self, go_cam_graph: GoCamGraph, report_file):
+        print_rows = []
+        for non_std_annot in go_cam_graph.non_standard_annotations:
+            for failure_reason in non_std_annot.failed_checks:
+                for bnode_id in non_std_annot.failed_checks[failure_reason]:
+                    edge = non_std_annot.edges[bnode_id]
+                    source_label = self.term_label(edge.source_type)
+                    prop_label = self.term_label(edge.property_uri)
+                    target_label = self.term_label(edge.target_type)
+                    # Model ID, title, reason, source, predicate, object
+                    cols = [
+                        go_cam_graph.model_id,
+                        go_cam_graph.title,
+                        failure_reason,
+                        source_label,
+                        prop_label,
+                        target_label,
+                    ]
+                    if cols not in print_rows:
+                        print_rows.append(cols)
+        for r in sorted(print_rows):
+            print("\t".join(r), file=report_file)
 
 
 if __name__ == "__main__":
@@ -602,6 +656,9 @@ if __name__ == "__main__":
     elif args.models_folder:
         for f in os.listdir(args.models_folder):
             if f.endswith(".ttl"):
+                # Skip files that start with any of the specified prefixes
+                if args.skip_prefixes and any(f.startswith(prefix) for prefix in args.skip_prefixes):
+                    continue
                 # If filter is provided, only include models in the filter
                 if model_id_filter is None or f.replace(".ttl", "") in model_id_filter:
                     model_files.append(os.path.join(args.models_folder, f))
@@ -617,8 +674,15 @@ if __name__ == "__main__":
         output = sys.stdout
 
     # Always print statistics header
-    headers = ["Model ID", "Title", "Standard Annotations", "Non-Standard Annotations", "Multi-Evidence Annotations", "Mixed Annotation Type"]
+    headers = ["Model ID", "Title", "Standard Annotations", "Non-Standard Annotations", "Multi-Evidence Annotations", "Mixed Annotation Type", "MF-causal->MF Edges"]
     print("\t".join(headers), file=output)
+
+    fail_report_file = None
+    if args.criteria_fail_report:
+        fail_report_file = open(args.criteria_fail_report, 'w')
+        criteria_fail_output = fail_report_file
+        crit_fail_report_headers = ["Model ID", "Title", "Reason", "Source", "Predicate", "Object"]
+        print("\t".join(crit_fail_report_headers), file=criteria_fail_output)
 
     if args.split_evidence and args.output_dir:
         os.makedirs(args.output_dir, exist_ok=True)
@@ -641,7 +705,17 @@ if __name__ == "__main__":
                     multi_evidence_count += 1
                     break  # Count this annotation once, move to next
 
-        print("\t".join(["gomodel:"+model_id, gocam_graph.title, str(len(gocam_graph.standard_annotations)), str(len(gocam_graph.non_standard_annotations)), str(multi_evidence_count), mixed_annotation_type]), file=output)
+        # Count MF causal edges in non-standard annotations
+        mf_causal_count = 0
+        for non_std_annot in gocam_graph.non_standard_annotations:
+            for causal_bnode_id in non_std_annot.failed_checks.get("mf_causal_mf", set()):
+                mf_causal_count += 1
+
+        if mixed_annotation_type == "Yes":
+            # print standard annotation fail_checks by edge
+            go_cam_graph_builder.print_non_standard_annotation_failed_checks(gocam_graph, report_file=criteria_fail_output)
+
+        print("\t".join(["gomodel:"+model_id, gocam_graph.title, str(len(gocam_graph.standard_annotations)), str(len(gocam_graph.non_standard_annotations)), str(multi_evidence_count), mixed_annotation_type, str(mf_causal_count)]), file=output)
 
         # Split evidence if requested
         if args.split_evidence and multi_evidence_count >= 1:
@@ -658,3 +732,6 @@ if __name__ == "__main__":
     # Close report file if it was opened
     if report_file:
         report_file.close()
+
+    if fail_report_file:
+        fail_report_file.close()

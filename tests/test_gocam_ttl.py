@@ -1,3 +1,4 @@
+import io
 import pytest
 import rdflib
 from gocam_unwinder.gocam_ttl import GoCamGraph, GoCamGraphBuilder
@@ -179,3 +180,100 @@ def test_mf_causal_mf_filtering():
     # More annotations should be non-standard when RO is provided (due to MF-causal->MF filtering)
     assert len(gocam_graph_with_ro.non_standard_annotations) >= len(gocam_graph_no_ro.non_standard_annotations), \
         "Should have at least as many non-standard annotations when MF-causal->MF filtering is applied"
+
+
+def test_print_non_standard_annotation_failed_checks():
+    """
+    Test that print_non_standard_annotation_failed_checks outputs correct TSV format
+    with model ID, title, failure reason, and term labels for source, predicate, object.
+    """
+    ro_ontology_file = "resources/test/ro_20250723.owl"
+    builder = GoCamGraphBuilder(ontology_file, ro_ontology_file)
+    gocam_graph = builder.parse_ttl("resources/test/5b318d0900000481.ttl")
+
+    # Verify we have non-standard annotations to report
+    assert len(gocam_graph.non_standard_annotations) > 0, "Should have non-standard annotations"
+
+    # Capture output using StringIO
+    output = io.StringIO()
+    builder.print_non_standard_annotation_failed_checks(gocam_graph, output)
+
+    # Get the output and parse it
+    output_content = output.getvalue()
+    lines = output_content.strip().split('\n') if output_content.strip() else []
+
+    # Should have at least one line of output
+    assert len(lines) > 0, "Should output at least one failure row"
+
+    # Verify TSV format - each line should have 6 tab-separated columns
+    for line in lines:
+        cols = line.split('\t')
+        assert len(cols) == 6, f"Each line should have 6 columns, got {len(cols)}: {line}"
+
+        model_id, title, failure_reason, source_label, prop_label, target_label = cols
+
+        # Model ID should be the model URI
+        assert "5b318d0900000481" in model_id, f"Model ID should contain model identifier: {model_id}"
+
+        # Title should be non-empty
+        assert title, "Title should not be empty"
+
+        # Failure reason should be one of the known check names
+        assert failure_reason in ["inconsistent_evidence", "multiple_mf_part_of", "mf_causal_mf"], \
+            f"Unknown failure reason: {failure_reason}"
+
+        # Labels should be non-empty (either term labels or CURIEs)
+        assert source_label, "Source label should not be empty"
+        assert prop_label, "Property label should not be empty"
+        assert target_label, "Target label should not be empty"
+
+    # Check for mf_causal_mf failures specifically
+    mf_causal_lines = [l for l in lines if "mf_causal_mf" in l]
+    assert len(mf_causal_lines) > 0, "Should have at least one mf_causal_mf failure"
+
+    # Verify term labels are resolved (not just CURIEs) for GO terms
+    # The model has protein kinase activity (GO:0004672) -> DNA-binding transcription factor activity (GO:0003700)
+    for line in mf_causal_lines:
+        cols = line.split('\t')
+        source_label, prop_label, target_label = cols[3], cols[4], cols[5]
+
+        # At least one of the GO term labels should be resolved to human-readable form
+        # (not just GO:XXXXXXX format)
+        go_labels = [source_label, target_label]
+        has_resolved_label = any(not label.startswith("GO:") for label in go_labels)
+        assert has_resolved_label, f"At least one GO term should have a resolved label: {go_labels}"
+
+    # Verify de-duplication: no duplicate rows
+    assert len(lines) == len(set(lines)), "Output should not contain duplicate rows"
+
+
+def test_print_non_standard_annotation_failed_checks_multiple_reasons():
+    """
+    Test that print_non_standard_annotation_failed_checks correctly reports
+    annotations that fail multiple checks.
+    """
+    # Use a model that has annotations failing the inconsistent_evidence check
+    builder = GoCamGraphBuilder(ontology_file)
+    gocam_graph = builder.parse_ttl("resources/test/61452e3d00000323.ttl")
+
+    # Verify we have non-standard annotations
+    assert len(gocam_graph.non_standard_annotations) > 0, "Should have non-standard annotations"
+
+    # Capture output
+    output = io.StringIO()
+    builder.print_non_standard_annotation_failed_checks(gocam_graph, output)
+
+    output_content = output.getvalue()
+    lines = output_content.strip().split('\n') if output_content.strip() else []
+
+    # Should have output for inconsistent_evidence failures
+    assert len(lines) > 0, "Should have failure output"
+
+    # Verify all lines have correct format
+    for line in lines:
+        cols = line.split('\t')
+        assert len(cols) == 6, f"Each line should have 6 columns: {line}"
+
+    # Check for inconsistent_evidence failures
+    inconsistent_lines = [l for l in lines if "inconsistent_evidence" in l]
+    assert len(inconsistent_lines) > 0, "Should have inconsistent_evidence failures"
