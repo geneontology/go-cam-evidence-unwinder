@@ -5,6 +5,7 @@ MODELS_DIR := /Users/ebertdu/go/noctua-models/models
 MINERVA_CLI_DIR := /Users/ebertdu/go/minerva/minerva-cli
 GO_ONTOLOGY := target/go_current.json
 RO_ONTOLOGY := target/ro_current.owl
+GROUPS_YAML := target/groups.yaml
 LEGO_JOURNAL := target/blazegraph-lego.jnl
 
 # Output directories and files
@@ -43,17 +44,23 @@ target/ro_current.owl:
 	mkdir -p target
 	wget http://purl.obolibrary.org/obo/ro.owl -O $@
 
+# Download groups.yaml for resolving group URIs to labels
+target/groups.yaml:
+	mkdir -p target
+	wget https://raw.githubusercontent.com/geneontology/go-site/master/metadata/groups.yaml -O $@
+
 # Full pipeline
 pipeline: $(GPAD_DIFF)
 	@echo "Pipeline complete. Results in $(TARGET_DIR)/"
 
 # Step 1: Run the unwinder to create split models
-$(MODELS_SPLIT): $(GO_ONTOLOGY) $(RO_ONTOLOGY)
+$(MODELS_SPLIT): $(GO_ONTOLOGY) $(RO_ONTOLOGY) $(GROUPS_YAML)
 	mkdir -p $(MODELS_SPLIT)
 	python3 src/gocam_unwinder/gocam_ttl.py \
 		-d $(MODELS_DIR) \
 		-o $(GO_ONTOLOGY) \
 		-r $(RO_ONTOLOGY) \
+		--groups-yaml $(GROUPS_YAML) \
 		--skip-prefix SYNGO \
 		--skip-prefix R-HSA \
 		--skip-prefix YeastPathways \

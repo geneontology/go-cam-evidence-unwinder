@@ -46,9 +46,10 @@ The Makefile provides targets for running the full evidence-splitting pipeline:
 # Run full pipeline (split models, create journals, export GPADs, diff)
 make pipeline
 
-# Download ontologies
+# Download ontologies and metadata
 make target/go_current.json
 make target/ro_current.owl
+make target/groups.yaml
 
 # Run individual pipeline steps (outputs to target_YYYYMMDD/)
 make target_$(date +%Y%m%d)/models_split           # Step 1: Run unwinder
@@ -64,6 +65,11 @@ make clean      # Remove today's target directory
 make clean-all  # Remove all target_* directories
 ```
 
+**Pipeline inputs** (in `target/`):
+- `go_current.json` - GO ontology (JSON format)
+- `ro_current.owl` - RO ontology (OWL format)
+- `groups.yaml` - Groups metadata from go-site for resolving group URIs to labels
+
 **Pipeline outputs** (in `target_YYYYMMDD/`):
 - `models_split/` - Split GO-CAM models (one evidence per edge)
 - `models_split_orig/` - Original models (for comparison)
@@ -74,6 +80,19 @@ make clean-all  # Remove all target_* directories
 - `gpad_diff.txt` - Diff between prod and dev GPADs
 - `noctua_models_graph_counts_YYYYMMDD.tsv` - Statistics report
 - `models_split_criteria_failures_YYYYMMDD.tsv` - Criteria failure report
+
+**Statistics report columns** (`--report-file`):
+- Model ID, Title - Model identifier and title
+- Standard Annotations - Count of annotations passing all checks
+- Non-Standard Annotations - Count of annotations failing one or more checks
+- Multi-Evidence Annotations - Count of standard annotations with >1 evidence on any edge
+- Mixed Annotation Type - "Yes" if model has both standard and non-standard annotations
+- MF-causal->MF Edges - Count of causal edges between molecular functions (in non-standard)
+- Model State - Model state from `http://geneontology.org/lego/modelstate` (e.g., "production", "development")
+- Groups - Pipe-separated list of contributing groups from `http://purl.org/pav/providedBy` (resolved to labels if `--groups-yaml` provided, e.g., "MGI", "ZFIN", "SGD")
+- Multi-Evidence GO Terms - Pipe-separated list of resolved GO term labels from multi-evidence annotations (excludes URIs and CURIEs that couldn't be resolved to labels)
+
+**Note:** Models with `modelstate == "delete"` are automatically skipped during processing.
 
 ### Running the Tool
 
@@ -110,6 +129,17 @@ python src/gocam_unwinder/gocam_ttl.py \
   -o target/go_20250601.json \
   --skip-prefix SYNGO \
   --skip-prefix R-HSA
+
+# Full pipeline with groups.yaml for resolving group URIs to labels
+python src/gocam_unwinder/gocam_ttl.py \
+  -d path/to/models/folder \
+  -o target/go_current.json \
+  -r target/ro_current.owl \
+  --groups-yaml target/groups.yaml \
+  --split-evidence \
+  --output-dir output/ \
+  --report-file report.tsv \
+  --criteria-fail-report failures.tsv
 ```
 
 ## Architecture
@@ -124,16 +154,20 @@ python src/gocam_unwinder/gocam_ttl.py \
 
 ### Core Components
 
-**GoCamGraph** (`src/gocam_unwinder/gocam_ttl.py:111-496`)
+**GoCamGraph** (`src/gocam_unwinder/gocam_ttl.py:113-542`)
 - Main data structure representing a GO-CAM model
 - Wraps an rdflib.Graph and extracts structured annotation information
+- Key properties:
+  - `model_id`: Model URI (e.g., "http://model.geneontology.org/MGI_MGI_1100089")
+  - `title`: Model title
+  - `modelstate`: Model state from `http://geneontology.org/lego/modelstate` (e.g., "production", "development", "delete")
+  - `groups`: List of contributing groups from `http://purl.org/pav/providedBy` (resolved to labels if lookup available)
 - Key methods:
-  - `parse_ttl()`: Class method to parse a TTL file into a GoCamGraph
+  - `get_model_id()`, `get_title()`, `get_modelstate()`, `get_groups()`: Extract model-level metadata
   - `extract_standard_annotations()`: Identifies and groups connected edges into StandardAnnotation objects
   - `get_evidence_metadata()`: Extracts metadata signature from evidence individuals for grouping
   - `group_evidence_by_metadata()`: Groups evidence across edges by identical metadata
   - `split_evidence_and_write_ttl()`: Splits multi-evidence annotations by evidence groups
-  - `filter_out_non_std_annotations()`: Filters based on structural patterns
 
 **StandardAnnotation** (`src/gocam_unwinder/gocam_ttl.py:43-68`)
 - Represents a connected component of edges forming a single annotation unit
@@ -147,18 +181,25 @@ python src/gocam_unwinder/gocam_ttl.py \
   - List of evidence URIs
   - Source and target types (GO terms, etc.)
 
-**GoCamGraphBuilder** (`src/gocam_unwinder/gocam_ttl.py:500-640`)
+**GoCamGraphBuilder** (`src/gocam_unwinder/gocam_ttl.py:545-680`)
 - Factory class that parses GO-CAM models with GO ontology context
-- Stores parsed ontologies for reuse:
+- Constructor: `GoCamGraphBuilder(ontology_path, ro_ontology_path=None, groups_yaml_path=None)`
+- Stores parsed ontologies and lookups for reuse:
   - `self.ontology`: GO ontology (via ontobio) for term lookups and MF classification
   - `self.ro_ontology`: RO ontology as rdflib.Graph (if provided) for causal relation hierarchy and labels
+  - `self.groups_lookup`: Dict mapping group URIs to labels (from groups.yaml, if provided)
 - Key methods:
-  - `parse_ttl()`: Parses a TTL file and applies filtering
+  - `parse_ttl()`: Parses a TTL file, extracts model metadata (including modelstate and groups with label resolution), and applies filtering
   - `uri_is_molecular_function()`: Checks if a URI is a molecular function using GoAspector
   - `uri_is_causal_relation()`: Checks if a URI is a causal relation (descendant of RO:0002418)
   - `term_label()`: Looks up human-readable labels for GO/RO/BFO terms from stored ontologies
   - `filter_out_non_std_annotations()`: Applies filtering checks and tracks failures
   - `print_non_standard_annotation_failed_checks()`: Outputs TSV report of failed checks with term labels
+
+**`load_groups_lookup(groups_yaml_path)`** (`src/gocam_unwinder/gocam_ttl.py:65-88`)
+- Loads groups.yaml from go-site and creates a URI → label lookup dictionary
+- The groups.yaml file contains entries like: `{id: "http://informatics.jax.org", label: "MGI"}`
+- Returns dict mapping group URIs to their labels (e.g., `{"http://informatics.jax.org": "MGI"}`)
 
 ### Key Algorithm: Standard Annotation Extraction
 

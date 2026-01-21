@@ -4,6 +4,7 @@ import sys
 
 import ontobio.util.go_utils
 import rdflib
+import yaml
 from ontobio.rdfgen import relations
 from rdflib import URIRef
 from prefixcommons import curie_util
@@ -21,6 +22,7 @@ parser.add_argument('--report-file', help="Output file for statistics report (TS
 parser.add_argument('--criteria-fail-report', help="Output file for standard annotation criteria failure report (TSV format).")
 parser.add_argument('--skip-prefix', action='append', dest='skip_prefixes', metavar='PREFIX',
                     help="Skip files starting with PREFIX (can be specified multiple times, e.g., --skip-prefix SYNGO --skip-prefix R-HSA)")
+parser.add_argument('--groups-yaml', help="Path to groups.yaml for resolving group URIs to labels")
 
 GOCAM_RELATIONS = [str(r) for r in relations.__relation_label_lookup.values()]
 
@@ -59,6 +61,32 @@ def get_relation_descendants(ro_graph: rdflib.Graph, root_relation_uri: str) -> 
                 queue.append(child)
 
     return descendants
+
+
+def load_groups_lookup(groups_yaml_path: str) -> dict:
+    """
+    Load groups.yaml and create a URI -> label lookup dictionary.
+
+    The groups.yaml file from go-site contains entries like:
+        - label: 'UniProt'
+          id: https://www.uniprot.org
+          shorthand: UniProt
+
+    Args:
+        groups_yaml_path: Path to the groups.yaml file
+
+    Returns:
+        Dictionary mapping group URIs to their labels
+    """
+    lookup = {}
+    with open(groups_yaml_path, 'r') as f:
+        groups_data = yaml.safe_load(f)
+
+    for group in groups_data:
+        if 'id' in group and 'label' in group:
+            lookup[group['id']] = group['label']
+
+    return lookup
 
 
 class StandardAnnotationEdge:
@@ -126,6 +154,8 @@ class GoCamGraph:
         self.non_standard_annotations = []
         self.model_id = None
         self.title = None
+        self.modelstate = None
+        self.groups = None
         self.individual_to_annotation = {}
 
     def write_ttl(self, filename):
@@ -343,6 +373,22 @@ class GoCamGraph:
         for title in self.g.objects(None, rdflib.DC.title):
             return title.replace("\t", " ").replace("\n", " ")
 
+    def get_modelstate(self):
+        """Get the model state, looking only at the model-level subject."""
+        model_uri = rdflib.URIRef(self.get_model_id())
+        modelstate_pred = rdflib.URIRef("http://geneontology.org/lego/modelstate")
+        for modelstate in self.g.objects(model_uri, modelstate_pred):
+            return str(modelstate)
+
+    def get_groups(self):
+        """Get all groups (providedBy values) at the model level."""
+        model_uri = rdflib.URIRef(self.get_model_id())
+        provided_by_pred = rdflib.URIRef("http://purl.org/pav/providedBy")
+        groups = []
+        for group in self.g.objects(model_uri, provided_by_pred):
+            groups.append(str(group))
+        return groups
+
     def find_axiom_bits(self, bnode_id):
         source_id = list(self.g.objects(bnode_id, rdflib.namespace.OWL.annotatedSource))[0]
         target_id = list(self.g.objects(bnode_id, rdflib.namespace.OWL.annotatedTarget))[0]
@@ -501,7 +547,7 @@ class GoCamGraphBuilder:
     # URI for the root causal relation
     CAUSALLY_UPSTREAM_OF_OR_WITHIN = "http://purl.obolibrary.org/obo/RO_0002418"
 
-    def __init__(self, ontology_path, ro_ontology_path=None):
+    def __init__(self, ontology_path, ro_ontology_path=None, groups_yaml_path=None):
         # Store and parse the GO ontology
         self.ontology = ontobio.ontol_factory.OntologyFactory().create(ontology_path)
         self.go_aspector = ontobio.util.go_utils.GoAspector(self.ontology)
@@ -514,6 +560,11 @@ class GoCamGraphBuilder:
             self.causal_relations = get_relation_descendants(self.ro_ontology, self.CAUSALLY_UPSTREAM_OF_OR_WITHIN)
         else:
             self.causal_relations = set()
+
+        # Load groups lookup if provided
+        self.groups_lookup = {}
+        if groups_yaml_path:
+            self.groups_lookup = load_groups_lookup(groups_yaml_path)
 
     def uri_is_causal_relation(self, uri: URIRef) -> bool:
         """
@@ -538,6 +589,13 @@ class GoCamGraphBuilder:
         gocam.g.parse(ttl_filename, format="ttl")
         gocam.model_id = gocam.get_model_id()
         gocam.title = gocam.get_title()
+        gocam.modelstate = gocam.get_modelstate()
+        # Get groups and resolve URIs to labels if lookup is available
+        group_uris = gocam.get_groups()
+        if self.groups_lookup:
+            gocam.groups = [self.groups_lookup.get(uri, uri) for uri in group_uris]
+        else:
+            gocam.groups = group_uris
         gocam.standard_annotations = []
         gocam.extract_standard_annotations()
         gocam = self.filter_out_non_std_annotations(gocam)
@@ -663,7 +721,7 @@ if __name__ == "__main__":
                 if model_id_filter is None or f.replace(".ttl", "") in model_id_filter:
                     model_files.append(os.path.join(args.models_folder, f))
 
-    go_cam_graph_builder = GoCamGraphBuilder(args.ontology_filename, args.ro_filename)
+    go_cam_graph_builder = GoCamGraphBuilder(args.ontology_filename, args.ro_filename, args.groups_yaml)
 
     # Open report file if specified, otherwise use stdout
     report_file = None
@@ -674,10 +732,11 @@ if __name__ == "__main__":
         output = sys.stdout
 
     # Always print statistics header
-    headers = ["Model ID", "Title", "Standard Annotations", "Non-Standard Annotations", "Multi-Evidence Annotations", "Mixed Annotation Type", "MF-causal->MF Edges"]
+    headers = ["Model ID", "Title", "Standard Annotations", "Non-Standard Annotations", "Multi-Evidence Annotations", "Mixed Annotation Type", "MF-causal->MF Edges", "Model State", "Groups", "Multi-Evidence GO Terms"]
     print("\t".join(headers), file=output)
 
     fail_report_file = None
+    criteria_fail_output = None
     if args.criteria_fail_report:
         fail_report_file = open(args.criteria_fail_report, 'w')
         criteria_fail_output = fail_report_file
@@ -689,6 +748,11 @@ if __name__ == "__main__":
 
     for f in model_files:
         gocam_graph = go_cam_graph_builder.parse_ttl(f)
+
+        # Skip models marked for deletion
+        if gocam_graph.modelstate == "delete":
+            continue
+
         filename = os.path.basename(f)
         model_id = filename.split(".")[0]
 
@@ -698,12 +762,29 @@ if __name__ == "__main__":
             mixed_annotation_type = "Yes"
 
         # Count annotations with multiple evidence on at least one edge
+        # Also collect GO term labels for terms in multi-evidence annotations
         multi_evidence_count = 0
+        multi_evidence_go_terms = set()
         for std_annot in gocam_graph.standard_annotations:
+            has_multi_evidence = False
             for edge in std_annot.edges.values():
                 if len(edge.evidence_uris) > 1:
-                    multi_evidence_count += 1
-                    break  # Count this annotation once, move to next
+                    has_multi_evidence = True
+                    break  # Found multi-evidence, no need to check more edges
+            if has_multi_evidence:
+                multi_evidence_count += 1
+                # Collect GO term labels from all edges in this annotation
+                # Skip URIs and CURIEs (only include resolved human-readable labels)
+                for edge in std_annot.edges.values():
+                    if edge.source_type:
+                        label = go_cam_graph_builder.term_label(edge.source_type)
+                        # Skip if URI, CURIE (contains ':'), or empty
+                        if label and not label.startswith("http") and ":" not in label:
+                            multi_evidence_go_terms.add(label)
+                    if edge.target_type:
+                        label = go_cam_graph_builder.term_label(edge.target_type)
+                        if label and not label.startswith("http") and ":" not in label:
+                            multi_evidence_go_terms.add(label)
 
         # Count MF causal edges in non-standard annotations
         mf_causal_count = 0
@@ -711,11 +792,16 @@ if __name__ == "__main__":
             for causal_bnode_id in non_std_annot.failed_checks.get("mf_causal_mf", set()):
                 mf_causal_count += 1
 
-        if mixed_annotation_type == "Yes":
+        if mixed_annotation_type == "Yes" and criteria_fail_output:
             # print standard annotation fail_checks by edge
             go_cam_graph_builder.print_non_standard_annotation_failed_checks(gocam_graph, report_file=criteria_fail_output)
 
-        print("\t".join(["gomodel:"+model_id, gocam_graph.title, str(len(gocam_graph.standard_annotations)), str(len(gocam_graph.non_standard_annotations)), str(multi_evidence_count), mixed_annotation_type, str(mf_causal_count)]), file=output)
+        # Format multi-evidence GO terms as pipe-separated list
+        multi_ev_terms_str = "|".join(sorted(multi_evidence_go_terms)) if multi_evidence_go_terms else ""
+        # Format groups as pipe-separated list
+        groups_str = "|".join(gocam_graph.groups) if gocam_graph.groups else ""
+        modelstate_str = gocam_graph.modelstate or ""
+        print("\t".join(["gomodel:"+model_id, gocam_graph.title, str(len(gocam_graph.standard_annotations)), str(len(gocam_graph.non_standard_annotations)), str(multi_evidence_count), mixed_annotation_type, str(mf_causal_count), modelstate_str, groups_str, multi_ev_terms_str]), file=output)
 
         # Split evidence if requested
         if args.split_evidence and multi_evidence_count >= 1:
