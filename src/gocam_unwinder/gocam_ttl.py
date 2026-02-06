@@ -127,6 +127,12 @@ class StandardAnnotation:
             [evidence_uris.add(ev) for ev in edge.evidence_uris]
         return evidence_uris
 
+    def has_muliple_evidence(self):
+        for edge in self.edges.values():
+            if len(edge.evidence_uris) > 1:
+                return True  # Found multi-evidence, no need to check more edges
+        return False
+
     def __str__(self):
         if self.edges:
             edge_classes = set()
@@ -786,12 +792,7 @@ if __name__ == "__main__":
         multi_evidence_count = 0
         multi_evidence_go_terms = set()
         for std_annot in gocam_graph.standard_annotations:
-            has_multi_evidence = False
-            for edge in std_annot.edges.values():
-                if len(edge.evidence_uris) > 1:
-                    has_multi_evidence = True
-                    break  # Found multi-evidence, no need to check more edges
-            if has_multi_evidence:
+            if std_annot.has_muliple_evidence():
                 multi_evidence_count += 1
                 # Collect GO term labels from all edges in this annotation
                 # Skip URIs and CURIEs (only include resolved human-readable labels)
@@ -805,6 +806,11 @@ if __name__ == "__main__":
                         label = go_cam_graph_builder.term_label(edge.target_type)
                         if label and not label.startswith("http") and ":" not in label:
                             multi_evidence_go_terms.add(label)
+
+        # Also compute multi_evidence_count for non-standard annotations
+        for non_std_annot in gocam_graph.non_standard_annotations:
+            if non_std_annot.has_muliple_evidence():
+                multi_evidence_count += 1
 
         # Count MF causal edges in non-standard annotations
         mf_causal_count = 0
