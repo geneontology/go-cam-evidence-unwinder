@@ -420,6 +420,26 @@ class GoCamGraph:
                 self.edges.append(edge)
             evidence_id = triple[2]
             edge.evidence_uris.append(evidence_id)
+
+        # Second pass: find axiom blank nodes without evidence
+        # These are owl:Axiom nodes with annotatedSource/Property/Target but no lego:evidence
+        for bnode in self.g.subjects(rdflib.RDF.type, rdflib.namespace.OWL.Axiom):
+            if not isinstance(bnode, rdflib.term.BNode):
+                continue
+            bnode_id = str(bnode)
+            # Skip if already extracted (has evidence)
+            if self.get_edge_by_bnode_id(bnode_id) is not None:
+                continue
+            # Check this axiom has the required OWL annotation bits
+            sources = list(self.g.objects(bnode, rdflib.namespace.OWL.annotatedSource))
+            targets = list(self.g.objects(bnode, rdflib.namespace.OWL.annotatedTarget))
+            properties = list(self.g.objects(bnode, rdflib.namespace.OWL.annotatedProperty))
+            if not sources or not targets or not properties:
+                continue
+            edge = StandardAnnotationEdge(bnode, sources[0], targets[0], properties[0])
+            self.edges.append(edge)
+            # edge.evidence_uris remains empty []
+
         return self.edges
 
     def extract_standard_annotations(self):
@@ -732,7 +752,7 @@ if __name__ == "__main__":
         output = sys.stdout
 
     # Always print statistics header
-    headers = ["Model ID", "Title", "Standard Annotations", "Non-Standard Annotations", "Multi-Evidence Annotations", "Mixed Annotation Type", "MF-causal->MF Edges", "Model State", "Groups", "Multi-Evidence GO Terms"]
+    headers = ["Model ID", "Title", "Standard Annotations", "Non-Standard Annotations", "Multi-Evidence Annotations", "Mixed Annotation Type", "MF-causal->MF Edges", "Edges w/o Evidence", "Model State", "Groups", "Multi-Evidence GO Terms"]
     print("\t".join(headers), file=output)
 
     fail_report_file = None
@@ -792,6 +812,14 @@ if __name__ == "__main__":
             for causal_bnode_id in non_std_annot.failed_checks.get("mf_causal_mf", set()):
                 mf_causal_count += 1
 
+        # Count edges without evidence across all annotations
+        no_evidence_edge_count = 0
+        all_annotations = gocam_graph.standard_annotations + gocam_graph.non_standard_annotations
+        for annot in all_annotations:
+            for edge in annot.edges.values():
+                if len(edge.evidence_uris) == 0:
+                    no_evidence_edge_count += 1
+
         if mixed_annotation_type == "Yes" and criteria_fail_output:
             # print standard annotation fail_checks by edge
             go_cam_graph_builder.print_non_standard_annotation_failed_checks(gocam_graph, report_file=criteria_fail_output)
@@ -801,7 +829,7 @@ if __name__ == "__main__":
         # Format groups as pipe-separated list
         groups_str = "|".join(gocam_graph.groups) if gocam_graph.groups else ""
         modelstate_str = gocam_graph.modelstate or ""
-        print("\t".join(["gomodel:"+model_id, gocam_graph.title, str(len(gocam_graph.standard_annotations)), str(len(gocam_graph.non_standard_annotations)), str(multi_evidence_count), mixed_annotation_type, str(mf_causal_count), modelstate_str, groups_str, multi_ev_terms_str]), file=output)
+        print("\t".join(["gomodel:"+model_id, gocam_graph.title, str(len(gocam_graph.standard_annotations)), str(len(gocam_graph.non_standard_annotations)), str(multi_evidence_count), mixed_annotation_type, str(mf_causal_count), str(no_evidence_edge_count), modelstate_str, groups_str, multi_ev_terms_str]), file=output)
 
         # Split evidence if requested
         if args.split_evidence and multi_evidence_count >= 1:
