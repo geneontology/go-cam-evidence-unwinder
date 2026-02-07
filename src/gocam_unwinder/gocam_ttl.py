@@ -789,11 +789,11 @@ if __name__ == "__main__":
 
         # Count annotations with multiple evidence on at least one edge
         # Also collect GO term labels for terms in multi-evidence annotations
-        multi_evidence_count = 0
+        std_multi_evidence_count = 0
         multi_evidence_go_terms = set()
         for std_annot in gocam_graph.standard_annotations:
             if std_annot.has_muliple_evidence():
-                multi_evidence_count += 1
+                std_multi_evidence_count += 1
                 # Collect GO term labels from all edges in this annotation
                 # Skip URIs and CURIEs (only include resolved human-readable labels)
                 for edge in std_annot.edges.values():
@@ -808,9 +808,13 @@ if __name__ == "__main__":
                             multi_evidence_go_terms.add(label)
 
         # Also compute multi_evidence_count for non-standard annotations
+        non_std_multi_evidence_count = 0
         for non_std_annot in gocam_graph.non_standard_annotations:
             if non_std_annot.has_muliple_evidence():
-                multi_evidence_count += 1
+                non_std_multi_evidence_count += 1
+
+        # This is what goes in the Multi-Evidence Annotations column
+        report_multi_evidence_count = std_multi_evidence_count + non_std_multi_evidence_count
 
         # Count MF causal edges in non-standard annotations
         mf_causal_count = 0
@@ -835,10 +839,10 @@ if __name__ == "__main__":
         # Format groups as pipe-separated list
         groups_str = "|".join(gocam_graph.groups) if gocam_graph.groups else ""
         modelstate_str = gocam_graph.modelstate or ""
-        print("\t".join(["gomodel:"+model_id, gocam_graph.title, str(len(gocam_graph.standard_annotations)), str(len(gocam_graph.non_standard_annotations)), str(multi_evidence_count), mixed_annotation_type, str(mf_causal_count), str(no_evidence_edge_count), modelstate_str, groups_str, multi_ev_terms_str]), file=output)
+        print("\t".join(["gomodel:"+model_id, gocam_graph.title, str(len(gocam_graph.standard_annotations)), str(len(gocam_graph.non_standard_annotations)), str(report_multi_evidence_count), mixed_annotation_type, str(mf_causal_count), str(no_evidence_edge_count), modelstate_str, groups_str, multi_ev_terms_str]), file=output)
 
-        # Split evidence if requested
-        if args.split_evidence and multi_evidence_count >= 1:
+        # Split evidence if requested and model contains standard annotations having multiple evidence edges
+        if args.split_evidence and std_multi_evidence_count >= 1:
             if args.output_dir:
                 output_filename = os.path.join(args.output_dir, filename)
             else:
