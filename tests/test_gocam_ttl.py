@@ -365,3 +365,25 @@ def test_edges_without_evidence_report_column():
                 no_evidence_count_all += 1
 
     assert no_evidence_count_all == 0, f"MGI_MGI_1100089 should have 0 edges without evidence, got {no_evidence_count_all}"
+
+
+def test_no_evidence_edge_gocam_relations_filter():
+    """
+    Regression test: model 57c82fad00000252 should be parsed as 1 non-standard annotation.
+
+    Without the GOCAM_RELATIONS filter in extract_edges()'s second pass,
+    non-GO-CAM axiom edges (like rdf:type reifications without evidence) are
+    extracted and fed into the union-find, causing the model to be incorrectly
+    split into 4 subgraphs (3 standard + 1 non-standard).
+    """
+    ro_ontology_file = "resources/test/ro_20250723.owl"
+    builder = GoCamGraphBuilder(ontology_file, ro_ontology_file)
+    gocam_graph = builder.parse_ttl("resources/test/57c82fad00000252.ttl")
+
+    std_count = len(gocam_graph.standard_annotations)
+    non_std_count = len(gocam_graph.non_standard_annotations)
+
+    assert std_count == 0, \
+        f"Expected 0 standard annotations, got {std_count}"
+    assert non_std_count == 1, \
+        f"Expected 1 non-standard annotation, got {non_std_count}"

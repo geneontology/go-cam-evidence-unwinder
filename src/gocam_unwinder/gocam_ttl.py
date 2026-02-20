@@ -442,6 +442,11 @@ class GoCamGraph:
             properties = list(self.g.objects(bnode, rdflib.namespace.OWL.annotatedProperty))
             if not sources or not targets or not properties:
                 continue
+            # Only include OBO relation edges (skip rdf:type, rdfs:label, oboInOwl#id, etc.)
+            # All GO-CAM relations (BFO, RO) use the OBO namespace prefix.
+            # GOCAM_RELATIONS is too restrictive (misses valid relations like RO:0002407).
+            if not str(properties[0]).startswith("http://purl.obolibrary.org/obo/"):
+                continue
             edge = StandardAnnotationEdge(bnode, sources[0], targets[0], properties[0])
             self.edges.append(edge)
             # edge.evidence_uris remains empty []

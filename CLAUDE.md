@@ -210,7 +210,7 @@ When writing implementation plans, use the template at `docs/plans/PLAN-TEMPLATE
 
 The `extract_standard_annotations()` method (lines 334-393) implements a union-find-like algorithm:
 
-1. Calls `extract_edges()` which discovers all OWL axiom edges — both those with evidence and those without (Issue #14). Edges without evidence get empty `evidence_uris` lists but still participate in subgraph assembly.
+1. Calls `extract_edges()` which discovers all OWL axiom edges — both those with evidence and those without (Issue #14). Edges without evidence are filtered to only include OBO namespace relations (`http://purl.obolibrary.org/obo/`), excluding non-GO-CAM axioms like `rdf:type`, `rdfs:label`, and `oboInOwl#id`. Included edges get empty `evidence_uris` lists but still participate in subgraph assembly.
 2. Tracks which StandardAnnotation each individual URI belongs to via `individual_to_annotation` dict
 3. When an edge connects two individuals:
    - If neither is in an annotation: create new annotation
@@ -314,6 +314,9 @@ Tests use real GO-CAM model examples in `resources/test/`:
 - **66c7d41500000016.ttl**: Human NRXN1B-CBLN1-GRID2 trans-synaptic model with 1 evidence-less causal edge
   - Contains RO:0002407 (indirectly positively regulates) edge between two MF nodes with no evidence
   - Used to test that edges without evidence are included in annotation subgraph assembly (Issue #14)
+- **57c82fad00000252.ttl**: C. elegans SAB neuron synaptogenesis model with 3 evidence-less OBO relation edges
+  - Regression test for OBO namespace filter in no-evidence edge extraction (Issue #14)
+  - Without the filter, non-GO-CAM axiom edges (oboInOwl#id, rdfs:label) cause incorrect subgraph splitting
 
 The test requires the GO ontology file at `target/go_20250601.json` (downloaded via Makefile). The MF-causal->MF test also requires `resources/test/ro_20250723.owl`.
 
@@ -344,3 +347,6 @@ The test requires the GO ontology file at `target/go_20250601.json` (downloaded 
 - `test_edges_without_evidence_report_column()`: Tests counting of edges without evidence:
   - Model 66c7d41500000016 should have exactly 1 edge without evidence
   - Model MGI_MGI_1100089 should have 0 edges without evidence
+- `test_no_evidence_edge_gocam_relations_filter()`: Regression test for OBO namespace filter in no-evidence edge extraction:
+  - Verifies model 57c82fad00000252 is parsed as 0 standard + 1 non-standard annotation (not 3+1)
+  - Confirms non-GO-CAM axiom edges (oboInOwl#id, rdfs:label) are filtered out during extraction
