@@ -255,6 +255,11 @@ Each `StandardAnnotation` has a `failed_checks` attribute:
    - Causal relations include: directly positively regulates (RO:0002629), directly negatively regulates (RO:0002630), etc.
    - This prevents MF-to-MF causal chains from being classified as standard annotations
 
+4. **Edges without evidence** (`edge_without_evidence`):
+   - Flags any edge in the annotation that has no `lego:evidence` triple
+   - When failed, only the no-evidence edges are recorded (not all edges)
+   - This prevents annotations with incomplete provenance from being classified as standard
+
 #### Reporting
 
 The `print_non_standard_annotation_failed_checks()` method outputs details about which edges failed which checks for non-standard annotations.
@@ -317,6 +322,8 @@ Tests use real GO-CAM model examples in `resources/test/`:
 - **57c82fad00000252.ttl**: C. elegans SAB neuron synaptogenesis model with 3 evidence-less OBO relation edges
   - Regression test for OBO namespace filter in no-evidence edge extraction (Issue #14)
   - Without the filter, non-GO-CAM axiom edges (oboInOwl#id, rdfs:label) cause incorrect subgraph splitting
+- **67369e7600005491.ttl**: Mouse Hnf4aos model with a subgraph (causally_upstream_of_or_within -> GO:0006954 inflammatory response) where all 3 edges have no evidence
+  - Used to test `edge_without_evidence` filter on an annotation with zero total evidence
 
 The test requires the GO ontology file at `target/go_20250601.json` (downloaded via Makefile). The MF-causal->MF test also requires `resources/test/ro_20250723.owl`.
 
@@ -350,3 +357,10 @@ The test requires the GO ontology file at `target/go_20250601.json` (downloaded 
 - `test_no_evidence_edge_gocam_relations_filter()`: Regression test for OBO namespace filter in no-evidence edge extraction:
   - Verifies model 57c82fad00000252 is parsed as 0 standard + 1 non-standard annotation (not 3+1)
   - Confirms non-GO-CAM axiom edges (oboInOwl#id, rdfs:label) are filtered out during extraction
+- `test_edge_without_evidence_filter()`: Tests that annotations with no-evidence edges get `edge_without_evidence` failed check:
+  - Uses model 66c7d41500000016 which has 1 no-evidence causal edge
+  - Verifies the no-evidence edge's bnode ID is recorded in failed_checks
+  - Verifies model MGI_MGI_1100089 (all edges have evidence) is unaffected
+- `test_edge_without_evidence_all_edges_no_evidence()`: Tests all-no-evidence subgraph using model 67369e7600005491:
+  - Verifies the GO:0006954 (inflammatory response) subgraph with 3 no-evidence edges is non-standard
+  - All 3 no-evidence edges are flagged in `failed_checks["edge_without_evidence"]`

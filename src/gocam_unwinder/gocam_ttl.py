@@ -666,6 +666,13 @@ class GoCamGraphBuilder:
                             failed_checks["mf_causal_mf"] = set()
                         failed_checks["mf_causal_mf"].add(edge.bnode_id)
 
+            # Check 4: Edges without evidence
+            for edge in std_annot.edges.values():
+                if len(edge.evidence_uris) == 0:
+                    if "edge_without_evidence" not in failed_checks:
+                        failed_checks["edge_without_evidence"] = set()
+                    failed_checks["edge_without_evidence"].add(edge.bnode_id)
+
             std_annot.failed_checks = failed_checks
 
             # Categorize annotation
