@@ -219,7 +219,7 @@ def test_print_non_standard_annotation_failed_checks():
         assert title, "Title should not be empty"
 
         # Failure reason should be one of the known check names
-        assert failure_reason in ["inconsistent_evidence", "multiple_mf_part_of", "mf_causal_mf"], \
+        assert failure_reason in ["inconsistent_evidence", "multiple_mf_part_of", "mf_causal_mf", "edge_without_evidence"], \
             f"Unknown failure reason: {failure_reason}"
 
         # Labels should be non-empty (either term labels or CURIEs)
@@ -277,3 +277,210 @@ def test_print_non_standard_annotation_failed_checks_multiple_reasons():
     # Check for inconsistent_evidence failures
     inconsistent_lines = [l for l in lines if "inconsistent_evidence" in l]
     assert len(inconsistent_lines) > 0, "Should have inconsistent_evidence failures"
+
+
+def test_edges_without_evidence():
+    """
+    Test that edges without evidence are included in annotation subgraph assembly.
+
+    Issue #14: Model 66c7d41500000016 has a causal edge (RO:0002407, "indirectly
+    positively regulates") between two MF nodes that has no evidence. Without
+    handling this, the model is incorrectly parsed as two separate annotation
+    subgraphs instead of one.
+
+    The model has 12 OWL axiom edges total, 11 with evidence and 1 without.
+    The no-evidence edge connects individual ...17 (GO:0030545, receptor ligand
+    activity) to ...25 (GO:0004971, AMPA glutamate receptor activity).
+    """
+    ro_ontology_file = "resources/test/ro_20250723.owl"
+    builder = GoCamGraphBuilder(ontology_file, ro_ontology_file)
+    gocam_graph = builder.parse_ttl("resources/test/66c7d41500000016.ttl")
+
+    # The two MF individuals that are bridged by the no-evidence causal edge
+    mf_source = rdflib.term.URIRef(
+        'http://model.geneontology.org/66c7d41500000016/66c7d41500000017')
+    mf_target = rdflib.term.URIRef(
+        'http://model.geneontology.org/66c7d41500000016/66c7d41500000025')
+
+    # Both individuals should be in the SAME annotation subgraph
+    # (not split into two separate subgraphs)
+    all_annotations = gocam_graph.standard_annotations + gocam_graph.non_standard_annotations
+    source_annot = None
+    target_annot = None
+    for annot in all_annotations:
+        if mf_source in annot.individuals:
+            source_annot = annot
+        if mf_target in annot.individuals:
+            target_annot = annot
+
+    assert source_annot is not None, "MF source individual should be in an annotation"
+    assert target_annot is not None, "MF target individual should be in an annotation"
+    assert source_annot is target_annot, \
+        "Both MF individuals should be in the SAME annotation (connected via no-evidence edge)"
+
+    # The combined annotation should be non-standard (due to mf_causal_mf or inconsistent_evidence)
+    assert source_annot in gocam_graph.non_standard_annotations, \
+        "The combined annotation should be non-standard"
+
+    # Verify the no-evidence edge is present in the annotation's edges
+    no_evidence_edge_found = False
+    for edge in source_annot.edges.values():
+        if (edge.source_uri == mf_source and edge.target_uri == mf_target and
+                str(edge.property_uri) == "http://purl.obolibrary.org/obo/RO_0002407"):
+            no_evidence_edge_found = True
+            assert len(edge.evidence_uris) == 0, "The bridging edge should have no evidence"
+            break
+    assert no_evidence_edge_found, "The no-evidence causal edge should be in the annotation"
+
+
+def test_edges_without_evidence_report_column():
+    """
+    Test that the report includes a column counting edges without evidence.
+    Issue #14: Report out models having edges without evidence.
+    """
+    ro_ontology_file = "resources/test/ro_20250723.owl"
+    builder = GoCamGraphBuilder(ontology_file, ro_ontology_file)
+    gocam_graph = builder.parse_ttl("resources/test/66c7d41500000016.ttl")
+
+    # Count edges without evidence across all annotations
+    no_evidence_count = 0
+    all_annotations = gocam_graph.standard_annotations + gocam_graph.non_standard_annotations
+    for annot in all_annotations:
+        for edge in annot.edges.values():
+            if len(edge.evidence_uris) == 0:
+                no_evidence_count += 1
+
+    # Model 66c7d41500000016 has exactly 1 edge without evidence
+    assert no_evidence_count == 1, f"Expected 1 edge without evidence, got {no_evidence_count}"
+
+    # Also verify a model with all edges having evidence reports 0
+    builder_no_ro = GoCamGraphBuilder(ontology_file)
+    gocam_graph_all_ev = builder_no_ro.parse_ttl("resources/test/MGI_MGI_1100089.ttl")
+
+    no_evidence_count_all = 0
+    all_annotations_all = gocam_graph_all_ev.standard_annotations + gocam_graph_all_ev.non_standard_annotations
+    for annot in all_annotations_all:
+        for edge in annot.edges.values():
+            if len(edge.evidence_uris) == 0:
+                no_evidence_count_all += 1
+
+    assert no_evidence_count_all == 0, f"MGI_MGI_1100089 should have 0 edges without evidence, got {no_evidence_count_all}"
+
+
+def test_no_evidence_edge_gocam_relations_filter():
+    """
+    Regression test: model 57c82fad00000252 should be parsed as 1 non-standard annotation.
+
+    Without the GOCAM_RELATIONS filter in extract_edges()'s second pass,
+    non-GO-CAM axiom edges (like rdf:type reifications without evidence) are
+    extracted and fed into the union-find, causing the model to be incorrectly
+    split into 4 subgraphs (3 standard + 1 non-standard).
+    """
+    ro_ontology_file = "resources/test/ro_20250723.owl"
+    builder = GoCamGraphBuilder(ontology_file, ro_ontology_file)
+    gocam_graph = builder.parse_ttl("resources/test/57c82fad00000252.ttl")
+
+    std_count = len(gocam_graph.standard_annotations)
+    non_std_count = len(gocam_graph.non_standard_annotations)
+
+    assert std_count == 0, \
+        f"Expected 0 standard annotations, got {std_count}"
+    assert non_std_count == 1, \
+        f"Expected 1 non-standard annotation, got {non_std_count}"
+
+
+def test_edge_without_evidence_filter():
+    """
+    Test that annotations containing edges without evidence are marked non-standard
+    with the 'edge_without_evidence' failed check.
+
+    Model 66c7d41500000016 has a causal edge (RO:0002407) with no evidence.
+    The annotation containing this edge should have 'edge_without_evidence' in
+    its failed_checks, with the no-evidence edge's bnode ID recorded.
+    """
+    ro_ontology_file = "resources/test/ro_20250723.owl"
+    builder = GoCamGraphBuilder(ontology_file, ro_ontology_file)
+    gocam_graph = builder.parse_ttl("resources/test/66c7d41500000016.ttl")
+
+    # The two MF individuals bridged by the no-evidence causal edge
+    mf_source = rdflib.term.URIRef(
+        'http://model.geneontology.org/66c7d41500000016/66c7d41500000017')
+
+    # Find the annotation containing mf_source
+    target_annot = None
+    for annot in gocam_graph.non_standard_annotations:
+        if mf_source in annot.individuals:
+            target_annot = annot
+            break
+    assert target_annot is not None, "Annotation should be in non_standard_annotations"
+
+    # The annotation should have 'edge_without_evidence' in its failed_checks
+    assert "edge_without_evidence" in target_annot.failed_checks, \
+        f"Expected 'edge_without_evidence' in failed_checks, got: {list(target_annot.failed_checks.keys())}"
+
+    # The failed check should contain exactly the no-evidence edge's bnode ID
+    no_ev_edge_bnodes = target_annot.failed_checks["edge_without_evidence"]
+    assert len(no_ev_edge_bnodes) == 1, \
+        f"Expected 1 edge without evidence, got {len(no_ev_edge_bnodes)}"
+
+    # Verify the flagged edge is actually the one without evidence
+    for edge in target_annot.edges.values():
+        if edge.bnode_id in no_ev_edge_bnodes:
+            assert len(edge.evidence_uris) == 0, "Flagged edge should have no evidence"
+
+    # Also verify that a model with all edges having evidence does NOT get this check
+    builder_no_ro = GoCamGraphBuilder(ontology_file)
+    gocam_graph_all_ev = builder_no_ro.parse_ttl("resources/test/MGI_MGI_1100089.ttl")
+    for annot in gocam_graph_all_ev.standard_annotations:
+        assert "edge_without_evidence" not in (annot.failed_checks or {}), \
+            "Annotations with all edges having evidence should not fail this check"
+
+
+def test_edge_without_evidence_all_edges_no_evidence():
+    """
+    Test that an annotation where ALL edges lack evidence is marked non-standard
+    with the 'edge_without_evidence' failed check.
+
+    Model 67369e7600005491 contains a subgraph with 3 edges (RO:0002333, BFO:0000066,
+    RO:0002418) connecting 4 individuals including GO:0006954 (inflammatory response),
+    where all edges have no evidence. This tests the case where an entire annotation
+    has zero evidence, not just a single bridging edge.
+    """
+    ro_ontology_file = "resources/test/ro_20250723.owl"
+    builder = GoCamGraphBuilder(ontology_file, ro_ontology_file)
+    gocam_graph = builder.parse_ttl("resources/test/67369e7600005491.ttl")
+
+    # Find the individual typed as GO:0006954 (inflammatory response)
+    inflammatory_response_type = rdflib.term.URIRef(
+        'http://purl.obolibrary.org/obo/GO_0006954')
+
+    target_individual = None
+    for s, p, o in gocam_graph.g.triples((None, rdflib.RDF.type, inflammatory_response_type)):
+        if str(s).startswith('http://model.geneontology.org/67369e7600005491'):
+            target_individual = s
+            break
+    assert target_individual is not None, "Should find an individual typed GO:0006954"
+
+    # Find the annotation containing this individual
+    target_annot = None
+    all_annotations = gocam_graph.standard_annotations + gocam_graph.non_standard_annotations
+    for annot in all_annotations:
+        if target_individual in annot.individuals:
+            target_annot = annot
+            break
+    assert target_annot is not None, "GO:0006954 individual should be in an annotation"
+
+    # The annotation should be non-standard
+    assert target_annot in gocam_graph.non_standard_annotations, \
+        "Annotation with all-no-evidence edges should be non-standard"
+
+    # It should have the edge_without_evidence failed check
+    assert "edge_without_evidence" in target_annot.failed_checks, \
+        f"Expected 'edge_without_evidence' in failed_checks, got: {list(target_annot.failed_checks.keys())}"
+
+    # Every edge without evidence in this annotation should be in the failed set
+    no_ev_edge_bnodes = target_annot.failed_checks["edge_without_evidence"]
+    actual_no_ev_edges = [e for e in target_annot.edges.values() if len(e.evidence_uris) == 0]
+    assert len(no_ev_edge_bnodes) == len(actual_no_ev_edges), \
+        f"All {len(actual_no_ev_edges)} no-evidence edges should be flagged, got {len(no_ev_edge_bnodes)}"
+    assert len(actual_no_ev_edges) == 3, "Should have 3 edges without evidence"

@@ -88,6 +88,7 @@ make clean-all  # Remove all target_* directories
 - Multi-Evidence Annotations - Count of standard annotations with >1 evidence on any edge
 - Mixed Annotation Type - "Yes" if model has both standard and non-standard annotations
 - MF-causal->MF Edges - Count of causal edges between molecular functions (in non-standard)
+- Edges w/o Evidence - Count of edges (OWL axioms with GO-CAM relations) that have no `lego:evidence` triple
 - Model State - Model state from `http://geneontology.org/lego/modelstate` (e.g., "production", "development")
 - Groups - Pipe-separated list of contributing groups from `http://purl.org/pav/providedBy` (resolved to labels if `--groups-yaml` provided, e.g., "MGI", "ZFIN", "SGD")
 - Multi-Evidence GO Terms - Pipe-separated list of resolved GO term labels from multi-evidence annotations (excludes URIs and CURIEs that couldn't be resolved to labels)
@@ -141,6 +142,10 @@ python src/gocam_unwinder/gocam_ttl.py \
   --report-file report.tsv \
   --criteria-fail-report failures.tsv
 ```
+
+## Planning
+
+When writing implementation plans, use the template at `docs/plans/PLAN-TEMPLATE.md`. Save plans to `docs/plans/YYYY-MM-DD-<feature-name>.md`.
 
 ## Architecture
 
@@ -205,7 +210,7 @@ python src/gocam_unwinder/gocam_ttl.py \
 
 The `extract_standard_annotations()` method (lines 334-393) implements a union-find-like algorithm:
 
-1. Iterates through all edges with evidence
+1. Calls `extract_edges()` which discovers all OWL axiom edges — both those with evidence and those without (Issue #14). Edges without evidence are filtered to only include OBO namespace relations (`http://purl.obolibrary.org/obo/`), excluding non-GO-CAM axioms like `rdf:type`, `rdfs:label`, and `oboInOwl#id`. Included edges get empty `evidence_uris` lists but still participate in subgraph assembly.
 2. Tracks which StandardAnnotation each individual URI belongs to via `individual_to_annotation` dict
 3. When an edge connects two individuals:
    - If neither is in an annotation: create new annotation
@@ -249,6 +254,11 @@ Each `StandardAnnotation` has a `failed_checks` attribute:
    - When failed, only the MF-causal->MF edges are recorded
    - Causal relations include: directly positively regulates (RO:0002629), directly negatively regulates (RO:0002630), etc.
    - This prevents MF-to-MF causal chains from being classified as standard annotations
+
+4. **Edges without evidence** (`edge_without_evidence`):
+   - Flags any edge in the annotation that has no `lego:evidence` triple
+   - When failed, only the no-evidence edges are recorded (not all edges)
+   - This prevents annotations with incomplete provenance from being classified as standard
 
 #### Reporting
 
@@ -306,6 +316,14 @@ Tests use real GO-CAM model examples in `resources/test/`:
 - **5b318d0900000481.ttl**: Human kinase activation template model with MF-to-MF causal edges
   - Contains GO:0004672 (protein kinase activity) → RO:0002629 (directly positively regulates) → GO:0003700 (DNA-binding transcription factor activity)
   - Used to test MF-causal->MF filtering when RO ontology is provided
+- **66c7d41500000016.ttl**: Human NRXN1B-CBLN1-GRID2 trans-synaptic model with 1 evidence-less causal edge
+  - Contains RO:0002407 (indirectly positively regulates) edge between two MF nodes with no evidence
+  - Used to test that edges without evidence are included in annotation subgraph assembly (Issue #14)
+- **57c82fad00000252.ttl**: C. elegans SAB neuron synaptogenesis model with 3 evidence-less OBO relation edges
+  - Regression test for OBO namespace filter in no-evidence edge extraction (Issue #14)
+  - Without the filter, non-GO-CAM axiom edges (oboInOwl#id, rdfs:label) cause incorrect subgraph splitting
+- **67369e7600005491.ttl**: Mouse Hnf4aos model with a subgraph (causally_upstream_of_or_within -> GO:0006954 inflammatory response) where all 3 edges have no evidence
+  - Used to test `edge_without_evidence` filter on an annotation with zero total evidence
 
 The test requires the GO ontology file at `target/go_20250601.json` (downloaded via Makefile). The MF-causal->MF test also requires `resources/test/ro_20250723.owl`.
 
@@ -329,3 +347,20 @@ The test requires the GO ontology file at `target/go_20250601.json` (downloaded 
 - `test_print_non_standard_annotation_failed_checks_multiple_reasons()`: Tests reporting with inconsistent_evidence failures:
   - Verifies correct format for models with evidence consistency failures
   - Confirms inconsistent_evidence check failures are properly reported
+- `test_edges_without_evidence()`: Tests that edges without evidence are included in annotation subgraph assembly (Issue #14):
+  - Verifies model 66c7d41500000016 is parsed as one annotation subgraph (not two)
+  - Verifies the no-evidence causal edge is present in the annotation with empty evidence_uris
+  - Verifies the combined annotation is classified as non-standard
+- `test_edges_without_evidence_report_column()`: Tests counting of edges without evidence:
+  - Model 66c7d41500000016 should have exactly 1 edge without evidence
+  - Model MGI_MGI_1100089 should have 0 edges without evidence
+- `test_no_evidence_edge_gocam_relations_filter()`: Regression test for OBO namespace filter in no-evidence edge extraction:
+  - Verifies model 57c82fad00000252 is parsed as 0 standard + 1 non-standard annotation (not 3+1)
+  - Confirms non-GO-CAM axiom edges (oboInOwl#id, rdfs:label) are filtered out during extraction
+- `test_edge_without_evidence_filter()`: Tests that annotations with no-evidence edges get `edge_without_evidence` failed check:
+  - Uses model 66c7d41500000016 which has 1 no-evidence causal edge
+  - Verifies the no-evidence edge's bnode ID is recorded in failed_checks
+  - Verifies model MGI_MGI_1100089 (all edges have evidence) is unaffected
+- `test_edge_without_evidence_all_edges_no_evidence()`: Tests all-no-evidence subgraph using model 67369e7600005491:
+  - Verifies the GO:0006954 (inflammatory response) subgraph with 3 no-evidence edges is non-standard
+  - All 3 no-evidence edges are flagged in `failed_checks["edge_without_evidence"]`
