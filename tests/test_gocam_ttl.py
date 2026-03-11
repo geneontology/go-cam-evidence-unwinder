@@ -484,3 +484,112 @@ def test_edge_without_evidence_all_edges_no_evidence():
     assert len(no_ev_edge_bnodes) == len(actual_no_ev_edges), \
         f"All {len(actual_no_ev_edges)} no-evidence edges should be flagged, got {len(no_ev_edge_bnodes)}"
     assert len(actual_no_ev_edges) == 3, "Should have 3 edges without evidence"
+
+
+def test_date_tolerant_evidence_grouping():
+    """
+    Test that evidence differing only in dc:date is grouped together.
+
+    Issue #15: Model MGI_MGI_1101770 has an annotation where the enabled_by
+    edge has evidence dated 2006-08-09 and the causally_upstream_of edge has
+    evidence dated 2023-02-13. The evidence is otherwise identical (same ECO,
+    same PMID, same contributor). These should be grouped together, and the
+    date should be updated to the most recent (2023-02-13).
+    """
+    builder = GoCamGraphBuilder(ontology_file)
+    gocam_graph = builder.parse_ttl("resources/test/MGI_MGI_1101770.ttl")
+
+    # Individual a9c5f5d3 is the Ring1 MF activity with date-differing evidence
+    test_individual = rdflib.term.URIRef(
+        'http://model.geneontology.org/MGI_MGI_1101770/a9c5f5d3-a960-420d-b052-1d264074a901')
+
+    # This annotation should be classified as standard (not filtered out)
+    std_annot = gocam_graph.get_standard_annotation_by_individual(test_individual)
+    assert std_annot is not None, \
+        "Date-differing evidence annotation should be standard (not filtered out)"
+    assert len(std_annot.edges) == 2, "Annotation should have 2 edges"
+
+    # Evidence grouping should produce 2 groups (one per PMID/ECO pair)
+    evidence_groups = gocam_graph.group_evidence_by_metadata(std_annot)
+    assert len(evidence_groups) == 2, \
+        f"Should have 2 evidence groups, got {len(evidence_groups)}"
+
+    # Each group should have evidence from both edges
+    for group_index, group_edges in evidence_groups.items():
+        assert len(group_edges) == 2, \
+            f"Group {group_index} should have evidence from both edges"
+
+
+def test_date_update_on_split():
+    """
+    Test that after splitting, evidence nodes are updated to the most recent dc:date.
+
+    Issue #15: When evidence is grouped across edges that have different dates,
+    the split output should use the most recent date for all evidence in the group.
+    """
+    builder = GoCamGraphBuilder(ontology_file)
+    gocam_graph = builder.parse_ttl("resources/test/MGI_MGI_1101770.ttl")
+
+    # Split and write
+    gocam_graph.split_evidence_and_write_ttl("target/MGI_MGI_1101770_split.ttl")
+
+    # Reload the split model
+    split_graph = rdflib.Graph()
+    split_graph.parse("target/MGI_MGI_1101770_split.ttl", format="turtle")
+
+    # Find all evidence URIs attached to the annotation edges for individual a9c5f5d3
+    # The evidence should all have the most recent date (2023-02-13)
+    date_pred = rdflib.namespace.DC.date
+    evidence_pred = rdflib.URIRef("http://geneontology.org/lego/evidence")
+
+    # Collect all evidence URIs from edges that reference individual a9c5f5d3
+    test_individual = rdflib.URIRef(
+        'http://model.geneontology.org/MGI_MGI_1101770/a9c5f5d3-a960-420d-b052-1d264074a901')
+    evidence_uris = set()
+    for bnode, _, _ in split_graph.triples((None, rdflib.namespace.OWL.annotatedSource, test_individual)):
+        for _, _, ev_uri in split_graph.triples((bnode, evidence_pred, None)):
+            evidence_uris.add(ev_uri)
+    for bnode, _, _ in split_graph.triples((None, rdflib.namespace.OWL.annotatedTarget, test_individual)):
+        for _, _, ev_uri in split_graph.triples((bnode, evidence_pred, None)):
+            evidence_uris.add(ev_uri)
+
+    assert len(evidence_uris) > 0, "Should find evidence URIs for the test individual"
+
+    # All evidence should have dc:date = "2023-02-13" (the most recent)
+    for ev_uri in evidence_uris:
+        dates = list(split_graph.objects(ev_uri, date_pred))
+        assert len(dates) == 1, f"Evidence {ev_uri} should have exactly 1 dc:date, got {len(dates)}"
+        assert str(dates[0]) == "2023-02-13", \
+            f"Evidence {ev_uri} should have date 2023-02-13, got {str(dates[0])}"
+
+
+def test_date_change_report():
+    """
+    Test that splitting produces date change records with edge info.
+
+    Issue #15: Records should include model ID, title, old date, new date,
+    and source/predicate/target type URIs for each updated edge.
+    """
+    builder = GoCamGraphBuilder(ontology_file)
+    gocam_graph = builder.parse_ttl("resources/test/MGI_MGI_1101770.ttl")
+
+    # Split and collect date change records
+    date_change_records = gocam_graph.split_evidence_and_write_ttl("target/MGI_MGI_1101770_split.ttl")
+
+    assert len(date_change_records) >= 1, "Should have at least 1 date change record"
+
+    for rec in date_change_records:
+        assert "MGI_MGI_1101770" in rec["model_id"]
+        assert rec["original_date"] != rec["new_date"], "Original and new dates should differ"
+        assert rec["new_date"] == "2023-02-13", "New date should be the most recent"
+        assert rec["source_type"] is not None, "Source type should not be None"
+        assert rec["property_uri"] is not None, "Property URI should not be None"
+        assert rec["target_type"] is not None, "Target type should not be None"
+
+        # Verify labels can be resolved
+        source_label = builder.term_label(rec["source_type"])
+        pred_label = builder.term_label(rec["property_uri"])
+        target_label = builder.term_label(rec["target_type"])
+        assert source_label, "Source label should not be empty"
+        assert pred_label, "Predicate label should not be empty"
+        assert target_label, "Target label should not be empty"

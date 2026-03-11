@@ -140,7 +140,8 @@ python src/gocam_unwinder/gocam_ttl.py \
   --split-evidence \
   --output-dir output/ \
   --report-file report.tsv \
-  --criteria-fail-report failures.tsv
+  --criteria-fail-report failures.tsv \
+  --date-change-report date_changes.tsv
 ```
 
 ## Planning
@@ -271,7 +272,7 @@ The evidence splitting process now groups evidence by metadata to handle multi-e
 #### Evidence Metadata Grouping
 
 The `get_evidence_metadata()` method (lines 102-127) extracts a metadata signature from each evidence individual:
-- Collects values for predicates in `PREDICATES_TO_COPY` (type, contributor, date, created, dateAccepted, providedBy, comment)
+- Collects values for predicates in `PREDICATES_TO_COPY`, **excluding date predicates** (`dc:date`, `dcterms:created`, `dcterms:dateAccepted`) so that evidence differing only in dates can be grouped together (Issue #15)
 - Also includes `evidence-with` and `source` predicates
 - Returns a hashable tuple that uniquely identifies evidence with identical metadata
 
@@ -288,7 +289,8 @@ This ensures that evidence representing the same "evidence event" across differe
 The `split_evidence_and_write_ttl()` method (lines 180-255) implements the actual splitting:
 
 1. For each standard annotation, get evidence groups via `group_evidence_by_metadata()`
-2. For each evidence group:
+2. Update `dc:date` to the most recent value across all evidence in each group, but only when dates actually differ (Issue #15). Updates both evidence individuals and BNode axioms. Prints a report line for each update: `Date updated to {date} for {model_id} ({title})`. Uses `get_most_recent_date()` and `update_evidence_date()` helper methods. Collects per-edge date change records (with source_type, property_uri, target_type URIs) for reporting
+3. For each evidence group:
    - Group 0 (first): keeps original blank nodes and individuals, removes extra evidence
    - Groups 1+ (subsequent): creates new blank nodes with suffix "-2", "-3", etc.
    - Creates new individual URIs with same suffix for all edges in the group
@@ -299,6 +301,8 @@ The `split_evidence_and_write_ttl()` method (lines 180-255) implements the actua
 **Example:** If an annotation has 2 edges with evidence [A, B] and [C, D] respectively, where metadata(A) == metadata(C) and metadata(B) == metadata(D):
 - Group 0: Edge 1 with evidence A + Edge 2 with evidence C (original nodes)
 - Group 1: Edge 1 with evidence B + Edge 2 with evidence D (new nodes with "-2" suffix)
+
+The method returns a list of date change record dicts (with keys: model_id, title, original_date, new_date, source_type, property_uri, target_type) for edges where `dc:date` was updated. In `main()`, these records are resolved to human-readable labels via `term_label()` and written to a TSV file if `--date-change-report` is specified. Report columns: Model ID, Title, Original Date, New Date, Source, Predicate, Target.
 
 This maintains provenance while ensuring one-to-one edge-to-evidence relationships and correct evidence grouping across edges.
 
@@ -324,6 +328,10 @@ Tests use real GO-CAM model examples in `resources/test/`:
   - Without the filter, non-GO-CAM axiom edges (oboInOwl#id, rdfs:label) cause incorrect subgraph splitting
 - **67369e7600005491.ttl**: Mouse Hnf4aos model with a subgraph (causally_upstream_of_or_within -> GO:0006954 inflammatory response) where all 3 edges have no evidence
   - Used to test `edge_without_evidence` filter on an annotation with zero total evidence
+- **MGI_MGI_1101770.ttl**: Mouse Ring1 model with date-differing evidence across edges (Issue #15)
+  - enabled_by edge has evidence dated 2006-08-09, causally_upstream_of edge has evidence dated 2023-02-13
+  - Evidence is otherwise identical (same ECO, PMID, contributor) — only dates and dcterms:created presence differ
+  - Used to test date-tolerant evidence grouping and date update during splitting
 
 The test requires the GO ontology file at `target/go_20250601.json` (downloaded via Makefile). The MF-causal->MF test also requires `resources/test/ro_20250723.owl`.
 
@@ -364,3 +372,14 @@ The test requires the GO ontology file at `target/go_20250601.json` (downloaded 
 - `test_edge_without_evidence_all_edges_no_evidence()`: Tests all-no-evidence subgraph using model 67369e7600005491:
   - Verifies the GO:0006954 (inflammatory response) subgraph with 3 no-evidence edges is non-standard
   - All 3 no-evidence edges are flagged in `failed_checks["edge_without_evidence"]`
+- `test_date_tolerant_evidence_grouping()`: Tests date-tolerant evidence grouping for Issue #15:
+  - Evidence differing only in dates (dc:date, dcterms:created) is grouped together
+  - Annotation with date-differing evidence is classified as standard
+  - Evidence grouping produces correct number of groups with evidence from all edges
+- `test_date_update_on_split()`: Tests date update during evidence splitting for Issue #15:
+  - After splitting, all evidence nodes have the most recent dc:date (2023-02-13)
+  - Verifies the split output file has updated dates
+- `test_date_change_report()`: Tests date change record collection during splitting for Issue #15:
+  - Verifies split returns date change records with model ID, title, dates, and edge type URIs
+  - Verifies original and new dates differ, and new date is the most recent (2023-02-13)
+  - Verifies edge labels can be resolved via `term_label()`
