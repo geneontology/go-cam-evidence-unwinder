@@ -20,6 +20,7 @@ GPAD_PROD := $(TARGET_DIR)/gpad_export_prod.gpad
 GPAD_DIFF := $(TARGET_DIR)/gpad_diff.txt
 REPORT_FILE := $(TARGET_DIR)/noctua_models_graph_counts_$(DATE).tsv
 CRITERIA_FAIL_REPORT := $(TARGET_DIR)/models_split_criteria_failures_$(DATE).tsv
+DATE_CHANGE_REPORT := $(TARGET_DIR)/date_changes_$(DATE).tsv
 
 # Default target
 .PHONY: all test clean pipeline
@@ -67,7 +68,9 @@ $(MODELS_SPLIT): $(GO_ONTOLOGY) $(RO_ONTOLOGY) $(GROUPS_YAML)
 		--split-evidence \
 		--output-dir $(MODELS_SPLIT) \
 		--report-file $(REPORT_FILE) \
-		--criteria-fail-report $(CRITERIA_FAIL_REPORT)
+		--criteria-fail-report $(CRITERIA_FAIL_REPORT) \
+		--date-change-report $(DATE_CHANGE_REPORT) \
+		| tee $(TARGET_DIR)/gocam_ttl.log
 	touch $@
 
 # Step 2: Copy original models that were split for comparison

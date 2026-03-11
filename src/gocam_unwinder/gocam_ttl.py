@@ -23,6 +23,7 @@ parser.add_argument('--criteria-fail-report', help="Output file for standard ann
 parser.add_argument('--skip-prefix', action='append', dest='skip_prefixes', metavar='PREFIX',
                     help="Skip files starting with PREFIX (can be specified multiple times, e.g., --skip-prefix SYNGO --skip-prefix R-HSA)")
 parser.add_argument('--groups-yaml', help="Path to groups.yaml for resolving group URIs to labels")
+parser.add_argument('--date-change-report', help="Output TSV file for date change report (model ID, title, original/new dates, edge labels)")
 
 GOCAM_RELATIONS = [str(r) for r in relations.__relation_label_lookup.values()]
 
@@ -171,11 +172,20 @@ class GoCamGraph:
         """
         Extract metadata for an evidence individual as a hashable tuple.
         This creates a signature that can identify equivalent evidence across edges.
+        Excludes date predicates (dc:date, dcterms:created, dcterms:dateAccepted) so that
+        evidence differing only in dates can be grouped together.
         """
+        date_predicates = {
+            rdflib.namespace.DC.date,
+            rdflib.namespace.DCTERMS.created,
+            rdflib.namespace.DCTERMS.dateAccepted,
+        }
         metadata = []
 
-        # Collect predicates defined in PREDICATES_TO_COPY
+        # Collect predicates defined in PREDICATES_TO_COPY, excluding date predicates
         for pred in self.PREDICATES_TO_COPY:
+            if pred in date_predicates:
+                continue  # Skip date predicates - handled separately during splitting
             values = sorted([str(obj) for obj in self.g.objects(evidence_uri, pred)])
             if values:
                 metadata.append((str(pred), tuple(values)))
@@ -245,6 +255,32 @@ class GoCamGraph:
 
         return groups
 
+    def get_most_recent_date(self, evidence_uris):
+        """
+        Find the most recent dc:date across a list of evidence URIs.
+        Returns the most recent date string, or None if no dates found.
+        """
+        date_pred = rdflib.namespace.DC.date
+        dates = []
+        for ev_uri in evidence_uris:
+            for date_val in self.g.objects(ev_uri, date_pred):
+                dates.append(str(date_val))
+        if dates:
+            return max(dates)  # ISO date strings sort lexicographically
+        return None
+
+    def update_evidence_date(self, evidence_uris, new_date):
+        """
+        Update dc:date on all given evidence URIs to the new_date value.
+        Removes existing dc:date triples and adds the new one.
+        """
+        date_pred = rdflib.namespace.DC.date
+        for ev_uri in evidence_uris:
+            # Remove existing dc:date
+            self.g.remove((ev_uri, date_pred, None))
+            # Add new dc:date
+            self.g.add((ev_uri, date_pred, rdflib.Literal(new_date)))
+
     def split_evidence_and_write_ttl(self, filename):
         """
         Split multi-evidence edges by grouping evidence with identical metadata across edges.
@@ -256,12 +292,57 @@ class GoCamGraph:
 
         This ensures that evidence representing the same "evidence event" across
         different edges stays together in the split annotations.
+
+        Returns a list of date change records (dicts with keys: model_id, title,
+        original_date, new_date, source_type, property_uri, target_type) for edges
+        where dc:date was updated.
         """
         evidence_pred = rdflib.URIRef("http://geneontology.org/lego/evidence")
+        date_change_records = []
 
         for std_annot in self.standard_annotations:
             # Get evidence groups for this annotation
             evidence_groups = self.group_evidence_by_metadata(std_annot)
+
+            # Update dc:date to most recent for each evidence group
+            date_pred = rdflib.namespace.DC.date
+            for group_index, group_edges in evidence_groups.items():
+                all_evidence_in_group = []
+                for edge_evidence_list in group_edges.values():
+                    all_evidence_in_group.extend(edge_evidence_list)
+                # Collect all distinct dates in this group
+                all_dates = set()
+                for ev_uri in all_evidence_in_group:
+                    for date_val in self.g.objects(ev_uri, date_pred):
+                        all_dates.add(str(date_val))
+                # Only update if dates actually differ
+                if len(all_dates) > 1:
+                    most_recent_date = max(all_dates)
+                    # Collect per-edge date changes before updating
+                    for edge_bnode_id, edge_evidence_list in group_edges.items():
+                        edge = std_annot.edges[edge_bnode_id]
+                        edge_dates = set()
+                        for ev_uri in edge_evidence_list:
+                            for date_val in self.g.objects(ev_uri, date_pred):
+                                edge_dates.add(str(date_val))
+                        for orig_date in edge_dates:
+                            if orig_date != most_recent_date:
+                                date_change_records.append({
+                                    "model_id": self.model_id,
+                                    "title": self.title,
+                                    "original_date": orig_date,
+                                    "new_date": most_recent_date,
+                                    "source_type": edge.source_type,
+                                    "property_uri": edge.property_uri,
+                                    "target_type": edge.target_type,
+                                })
+                    print(f"Date updated to {most_recent_date} for {self.model_id} ({self.title})")
+                    self.update_evidence_date(all_evidence_in_group, most_recent_date)
+                    # Also update dc:date on the BNode axioms for each edge
+                    for edge_bnode_id in group_edges.keys():
+                        bnode = rdflib.term.BNode(edge_bnode_id)
+                        self.g.remove((bnode, date_pred, None))
+                        self.g.add((bnode, date_pred, rdflib.Literal(most_recent_date)))
 
             # Track which individuals have been created for each group
             # Map: (original_uri, group_suffix) -> new_uri
@@ -321,6 +402,7 @@ class GoCamGraph:
                             self.g.add((new_bnode, evidence_pred, evidence_uri))
 
         self.write_ttl(filename)
+        return date_change_records
 
     def clone_bnode(self, old_bnode: rdflib.term.BNode, new_bnode: rdflib.term.BNode):
         # Clone the bnode and its properties to a new bnode
@@ -784,6 +866,8 @@ if __name__ == "__main__":
     if args.split_evidence and args.output_dir:
         os.makedirs(args.output_dir, exist_ok=True)
 
+    all_date_change_records = []
+
     for f in model_files:
         gocam_graph = go_cam_graph_builder.parse_ttl(f)
 
@@ -862,8 +946,22 @@ if __name__ == "__main__":
                 base_name = os.path.splitext(f)[0]
                 output_filename = base_name + "_split.ttl"
 
-            gocam_graph.split_evidence_and_write_ttl(output_filename)
+            date_records = gocam_graph.split_evidence_and_write_ttl(output_filename)
+            all_date_change_records.extend(date_records)
             print(f"Split evidence for {filename} -> {output_filename}")
+
+    # Write date change report if requested
+    if args.date_change_report and all_date_change_records:
+        with open(args.date_change_report, 'w') as dcr_file:
+            dcr_headers = ["Model ID", "Title", "Original Date", "New Date", "Source", "Predicate", "Target"]
+            print("\t".join(dcr_headers), file=dcr_file)
+            for rec in all_date_change_records:
+                source_label = go_cam_graph_builder.term_label(rec["source_type"]) if rec["source_type"] else ""
+                pred_label = go_cam_graph_builder.term_label(rec["property_uri"]) if rec["property_uri"] else ""
+                target_label = go_cam_graph_builder.term_label(rec["target_type"]) if rec["target_type"] else ""
+                cols = [rec["model_id"], rec["title"], rec["original_date"], rec["new_date"],
+                        source_label, pred_label, target_label]
+                print("\t".join(cols), file=dcr_file)
 
     # Close report file if it was opened
     if report_file:
