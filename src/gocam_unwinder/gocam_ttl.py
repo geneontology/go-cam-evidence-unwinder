@@ -697,6 +697,66 @@ class GoCamGraphBuilder:
             return self.go_aspector.is_molecular_function(parsed_curies[0])
         return False
 
+    def uri_is_biological_process(self, uri: URIRef) -> bool:
+        """
+        Check if the URI refers to a biological process in the GO ontology.
+        """
+        parsed_curies = curie_util.contract_uri(str(uri))
+        if parsed_curies and parsed_curies[0].startswith("GO:"):
+            return self.go_aspector.is_biological_process(parsed_curies[0])
+        return False
+
+    def uri_is_cellular_component(self, uri: URIRef) -> bool:
+        """
+        Check if the URI refers to a cellular component in the GO ontology.
+        """
+        parsed_curies = curie_util.contract_uri(str(uri))
+        if parsed_curies and parsed_curies[0].startswith("GO:"):
+            return self.go_aspector.is_cellular_component(parsed_curies[0])
+        return False
+
+    def get_extension_edges(self, annot: StandardAnnotation) -> List[StandardAnnotationEdge]:
+        """
+        Return edges in `annot` that are annotation extensions —
+        edges that fall outside the gene-product -> MF/BP/CC backbone.
+
+        Backbone patterns (any match -> the edge is backbone, not extension):
+          1. MF backbone: predicate == enabled_by AND source is MF
+          2. BP backbone: predicate == part_of AND source is MF AND target is BP
+          3. CC backbone: predicate in {located_in, is_active_in} AND target is CC
+
+        Multi-hop extensions (e.g., CL -part_of-> EMAPA reached via the BP node)
+        are returned because they fail to match any backbone pattern.
+
+        The returned list preserves the order of `annot.edges`.
+        """
+        enabled_by = URIRef(relations.lookup_label("enabled by"))
+        part_of = URIRef(relations.lookup_label("part of"))
+        located_in = URIRef(relations.lookup_label("located in"))
+        is_active_in = URIRef(relations.lookup_label("is active in"))
+        cc_predicates = {located_in, is_active_in}
+
+        backbone_bnode_ids = set()
+        for edge in annot.edges.values():
+            # Rule 1: MF backbone (MF -enabled_by-> GP). Also covers the
+            # MF-enabled_by-GP edge inside a BP or CC annotation.
+            if edge.property_uri == enabled_by and self.uri_is_molecular_function(edge.source_type):
+                backbone_bnode_ids.add(edge.bnode_id)
+                continue
+            # Rule 2: BP backbone (MF -part_of-> BP)
+            if (edge.property_uri == part_of
+                    and self.uri_is_molecular_function(edge.source_type)
+                    and self.uri_is_biological_process(edge.target_type)):
+                backbone_bnode_ids.add(edge.bnode_id)
+                continue
+            # Rule 3: CC backbone (GP -located_in/is_active_in-> CC)
+            if (edge.property_uri in cc_predicates
+                    and self.uri_is_cellular_component(edge.target_type)):
+                backbone_bnode_ids.add(edge.bnode_id)
+                continue
+
+        return [edge for edge in annot.edges.values() if edge.bnode_id not in backbone_bnode_ids]
+
     def parse_ttl(self, ttl_filename):
         gocam = GoCamGraph()
         gocam.g.parse(ttl_filename, format="ttl")

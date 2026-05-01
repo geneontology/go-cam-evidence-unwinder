@@ -593,3 +593,82 @@ def test_date_change_report():
         assert source_label, "Source label should not be empty"
         assert pred_label, "Predicate label should not be empty"
         assert target_label, "Target label should not be empty"
+
+
+def test_get_extension_edges():
+    """
+    Test that get_extension_edges() returns the non-backbone edges of a
+    StandardAnnotation. Uses the GO:0120045 (stereocilium maintenance)
+    annotation in 5966411600000001.ttl, which has 5 edges total:
+    - 2 backbone edges (MF-enabled_by->GP, MF-part_of->BP)
+    - 3 extension edges (BP-part_of->BP, BP-occurs_in->CL, CL-part_of->EMAPA)
+    """
+    builder = GoCamGraphBuilder(ontology_file)
+    gocam_graph = builder.parse_ttl("resources/test/5966411600000001.ttl")
+
+    # Locate the annotation containing the GO:0120045 individual.
+    # The annotation may be in either standard or non_standard list.
+    bp_individual = rdflib.term.URIRef(
+        'http://model.geneontology.org/5966411600000001/5966411600000004')
+    target_annot = None
+    for annot in gocam_graph.standard_annotations + gocam_graph.non_standard_annotations:
+        if bp_individual in annot.individuals:
+            target_annot = annot
+            break
+    assert target_annot is not None, \
+        "Annotation containing the GO:0120045 individual should exist"
+
+    # Sanity: the annotation in this model has 5 edges
+    assert len(target_annot.edges) == 5, \
+        f"Expected 5 edges in the GO:0120045 annotation, got {len(target_annot.edges)}"
+
+    # Call the method under test
+    extensions = builder.get_extension_edges(target_annot)
+
+    # Should return exactly 3 extension edges
+    assert len(extensions) == 3, \
+        f"Expected 3 extension edges, got {len(extensions)}"
+
+    # Verify each returned edge by (predicate, source_type, target_type) tuple.
+    # bnode IDs are not stable across parses — use type triples instead.
+    actual_tuples = {
+        (str(e.property_uri), str(e.source_type), str(e.target_type))
+        for e in extensions
+    }
+    expected_tuples = {
+        # BP -part_of-> BP (GO:0120045 -> GO:0007605)
+        ("http://purl.obolibrary.org/obo/BFO_0000050",
+         "http://purl.obolibrary.org/obo/GO_0120045",
+         "http://purl.obolibrary.org/obo/GO_0007605"),
+        # BP -occurs_in-> CL (GO:0120045 -> CL:0000202)
+        ("http://purl.obolibrary.org/obo/BFO_0000066",
+         "http://purl.obolibrary.org/obo/GO_0120045",
+         "http://purl.obolibrary.org/obo/CL_0000202"),
+        # CL -part_of-> EMAPA (CL:0000202 -> EMAPA:17597)
+        ("http://purl.obolibrary.org/obo/BFO_0000050",
+         "http://purl.obolibrary.org/obo/CL_0000202",
+         "http://purl.obolibrary.org/obo/EMAPA_17597"),
+    }
+    assert actual_tuples == expected_tuples, \
+        f"Extension edges differ.\n  expected: {expected_tuples}\n  got:      {actual_tuples}"
+
+    # Verify the 2 backbone edges (MF-enabled_by->GP, MF-part_of->BP) are NOT in the result
+    extension_bnodes = {e.bnode_id for e in extensions}
+    backbone_tuples_seen = set()
+    for edge in target_annot.edges.values():
+        if edge.bnode_id in extension_bnodes:
+            continue
+        backbone_tuples_seen.add(
+            (str(edge.property_uri), str(edge.source_type), str(edge.target_type)))
+    expected_backbone = {
+        # MF -enabled_by-> GP
+        ("http://purl.obolibrary.org/obo/RO_0002333",
+         "http://purl.obolibrary.org/obo/GO_0003674",
+         "http://identifiers.org/mgi/MGI:2139535"),
+        # MF -part_of-> BP
+        ("http://purl.obolibrary.org/obo/BFO_0000050",
+         "http://purl.obolibrary.org/obo/GO_0003674",
+         "http://purl.obolibrary.org/obo/GO_0120045"),
+    }
+    assert backbone_tuples_seen == expected_backbone, \
+        f"Backbone edges differ.\n  expected: {expected_backbone}\n  got:      {backbone_tuples_seen}"
