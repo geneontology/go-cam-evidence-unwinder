@@ -757,6 +757,48 @@ class GoCamGraphBuilder:
 
         return [edge for edge in annot.edges.values() if edge.bnode_id not in backbone_bnode_ids]
 
+    def get_primary_go_terms(self, annot: StandardAnnotation) -> dict:
+        """
+        Return the primary GO term URIs of an annotation, grouped by aspect.
+
+        The primary GO term per aspect is identified by which edge matches a
+        backbone pattern (same rules as get_extension_edges):
+          - MF: source_type of an MF -enabled_by-> GP edge
+          - BP: target_type of an MF -part_of-> BP edge
+          - CC: target_type of a   ? -located_in/is_active_in-> CC edge
+
+        Returns a dict mapping aspect ("MF", "BP", "CC") to a list of primary
+        term URIs. Aspect keys are absent when no backbone match is found for
+        that aspect. Lists are typically length 1 but can be longer if the
+        annotation contains multiple matching backbone edges (rare in
+        well-formed data, useful to surface).
+        """
+        enabled_by = URIRef(relations.lookup_label("enabled by"))
+        part_of = URIRef(relations.lookup_label("part of"))
+        located_in = URIRef(relations.lookup_label("located in"))
+        is_active_in = URIRef(relations.lookup_label("is active in"))
+        cc_predicates = {located_in, is_active_in}
+
+        primary = {}
+        for edge in annot.edges.values():
+            # Rule 1: MF backbone -> primary MF is the source type
+            if edge.property_uri == enabled_by and self.uri_is_molecular_function(edge.source_type):
+                primary.setdefault("MF", []).append(edge.source_type)
+                continue
+            # Rule 2: BP backbone -> primary BP is the target type
+            if (edge.property_uri == part_of
+                    and self.uri_is_molecular_function(edge.source_type)
+                    and self.uri_is_biological_process(edge.target_type)):
+                primary.setdefault("BP", []).append(edge.target_type)
+                continue
+            # Rule 3: CC backbone -> primary CC is the target type
+            if (edge.property_uri in cc_predicates
+                    and self.uri_is_cellular_component(edge.target_type)):
+                primary.setdefault("CC", []).append(edge.target_type)
+                continue
+
+        return primary
+
     def parse_ttl(self, ttl_filename):
         gocam = GoCamGraph()
         gocam.g.parse(ttl_filename, format="ttl")
