@@ -197,10 +197,13 @@ When writing implementation plans, use the template at `docs/plans/PLAN-TEMPLATE
 - Key methods:
   - `parse_ttl()`: Parses a TTL file, extracts model metadata (including modelstate and groups with label resolution), and applies filtering
   - `uri_is_molecular_function()`: Checks if a URI is a molecular function using GoAspector
+  - `uri_is_biological_process()`: Checks if a URI is a biological process using GoAspector
+  - `uri_is_cellular_component()`: Checks if a URI is a cellular component using GoAspector
   - `uri_is_causal_relation()`: Checks if a URI is a causal relation (descendant of RO:0002418)
   - `term_label()`: Looks up human-readable labels for GO/RO/BFO terms from stored ontologies
   - `filter_out_non_std_annotations()`: Applies filtering checks and tracks failures
   - `print_non_standard_annotation_failed_checks()`: Outputs TSV report of failed checks with term labels
+  - `get_extension_edges()`: Returns the edges of a `StandardAnnotation` that are annotation extensions (i.e., not part of the gene-product → MF/BP/CC backbone)
 
 **`load_groups_lookup(groups_yaml_path)`** (`src/gocam_unwinder/gocam_ttl.py:65-88`)
 - Loads groups.yaml from go-site and creates a URI → label lookup dictionary
@@ -332,6 +335,9 @@ Tests use real GO-CAM model examples in `resources/test/`:
   - enabled_by edge has evidence dated 2006-08-09, causally_upstream_of edge has evidence dated 2023-02-13
   - Evidence is otherwise identical (same ECO, PMID, contributor) — only dates and dcterms:created presence differ
   - Used to test date-tolerant evidence grouping and date update during splitting
+- **5966411600000001.ttl**: Mouse stereocilium maintenance model with the `GO:0120045` BP annotation as a 5-edge subgraph
+  - 2 backbone edges (`MF─enabled_by→GP`, `MF─part_of→BP`) plus 3 extension edges including the chain `BP─occurs_in→CL─part_of→EMAPA`
+  - Used to test `get_extension_edges()` (backbone vs. extension classification across all three GO aspects)
 
 The test requires the GO ontology file at `target/go_20250601.json` (downloaded via Makefile). The MF-causal->MF test also requires `resources/test/ro_20250723.owl`.
 
@@ -383,3 +389,7 @@ The test requires the GO ontology file at `target/go_20250601.json` (downloaded 
   - Verifies split returns date change records with model ID, title, dates, and edge type URIs
   - Verifies original and new dates differ, and new date is the most recent (2023-02-13)
   - Verifies edge labels can be resolved via `term_label()`
+- `test_get_extension_edges()`: Tests `get_extension_edges()` backbone-vs-extension classification on the 5-edge GO:0120045 annotation in 5966411600000001.ttl:
+  - Returns exactly the 3 expected extension edges, identified by `(predicate, source_type, target_type)` tuples
+  - Confirms the 2 remaining backbone edges (MF-enabled_by-GP and MF-part_of-BP) are not in the result
+  - Searches both `standard_annotations` and `non_standard_annotations` since the method works regardless of classification

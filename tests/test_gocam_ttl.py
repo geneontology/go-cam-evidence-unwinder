@@ -672,3 +672,139 @@ def test_get_extension_edges():
     }
     assert backbone_tuples_seen == expected_backbone, \
         f"Backbone edges differ.\n  expected: {expected_backbone}\n  got:      {backbone_tuples_seen}"
+
+
+def test_get_primary_go_terms():
+    """
+    Test that get_primary_go_terms() returns the primary GO term URIs of an
+    annotation, grouped by aspect ("MF", "BP", "CC"). Uses the GO:0120045
+    (stereocilium maintenance) annotation in 5966411600000001.ttl, which has:
+      - MF backbone (MF-enabled_by-GP)   -> primary MF = GO:0003674
+      - BP backbone (MF-part_of-BP)      -> primary BP = GO:0120045
+      - No CC backbone                   -> "CC" key absent
+    """
+    builder = GoCamGraphBuilder(ontology_file)
+    gocam_graph = builder.parse_ttl("resources/test/5966411600000001.ttl")
+
+    # Locate the annotation containing the GO:0120045 individual.
+    bp_individual = rdflib.term.URIRef(
+        'http://model.geneontology.org/5966411600000001/5966411600000004')
+    target_annot = None
+    for annot in gocam_graph.standard_annotations + gocam_graph.non_standard_annotations:
+        if bp_individual in annot.individuals:
+            target_annot = annot
+            break
+    assert target_annot is not None, \
+        "Annotation containing the GO:0120045 individual should exist"
+
+    primaries = builder.get_primary_go_terms(target_annot)
+
+    # Expect exactly the two aspects present
+    assert set(primaries.keys()) == {"MF", "BP"}, \
+        f"Expected aspects {{'MF', 'BP'}}, got {set(primaries.keys())}"
+
+    # Each aspect's list should have exactly 1 URI for this annotation
+    assert len(primaries["MF"]) == 1, \
+        f"Expected 1 primary MF URI, got {len(primaries['MF'])}: {primaries['MF']}"
+    assert len(primaries["BP"]) == 1, \
+        f"Expected 1 primary BP URI, got {len(primaries['BP'])}: {primaries['BP']}"
+
+    # Verify the actual URIs
+    assert str(primaries["MF"][0]) == "http://purl.obolibrary.org/obo/GO_0003674", \
+        f"Primary MF should be GO:0003674, got {primaries['MF'][0]}"
+    assert str(primaries["BP"][0]) == "http://purl.obolibrary.org/obo/GO_0120045", \
+        f"Primary BP should be GO:0120045, got {primaries['BP'][0]}"
+
+    # CC key should be absent (no CC backbone in this annotation)
+    assert "CC" not in primaries, \
+        f"Expected no 'CC' key, got primaries={primaries}"
+
+
+# ---------------------------------------------------------------------------
+# _resolve_mf_type() helper tests (Task 2)
+# ---------------------------------------------------------------------------
+
+def test_resolve_mf_type_direct_uri():
+    builder = GoCamGraphBuilder(ontology_file)
+    mf_uri = rdflib.URIRef("http://purl.obolibrary.org/obo/GO_0042802")  # identical protein binding (MF)
+    g = rdflib.Graph()
+    assert builder._resolve_mf_type(mf_uri, g) == mf_uri
+
+
+def test_resolve_mf_type_non_mf_uri_returns_none():
+    builder = GoCamGraphBuilder(ontology_file)
+    bp_uri = rdflib.URIRef("http://purl.obolibrary.org/obo/GO_0006954")  # inflammatory response (BP)
+    g = rdflib.Graph()
+    assert builder._resolve_mf_type(bp_uri, g) is None
+
+
+def test_resolve_mf_type_complement_of_mf():
+    builder = GoCamGraphBuilder(ontology_file)
+    g = rdflib.Graph()
+    g.parse(data='''
+        @prefix owl: <http://www.w3.org/2002/07/owl#> .
+        @prefix rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
+        _:mf_indiv rdf:type [ rdf:type owl:Class ;
+                              owl:complementOf <http://purl.obolibrary.org/obo/GO_0042802> ] .
+    ''', format="ttl")
+    # Find the bnode that's the value of rdf:type
+    bnode = None
+    for _, _, o in g.triples((None, rdflib.RDF.type, None)):
+        if isinstance(o, rdflib.BNode):
+            bnode = o
+            break
+    assert bnode is not None, "Test setup: expected a bnode class expression"
+    resolved = builder._resolve_mf_type(bnode, g)
+    assert resolved == rdflib.URIRef("http://purl.obolibrary.org/obo/GO_0042802")
+
+
+# ---------------------------------------------------------------------------
+# invalid_gp_mf_relation check tests (Task 3)
+# ---------------------------------------------------------------------------
+
+def test_gp_mf_relation_allows_enables():
+    builder = GoCamGraphBuilder(ontology_file)
+    gocam = builder.parse_ttl("resources/test/MGI_MGI_1100089.ttl")
+    for annot in gocam.standard_annotations + gocam.non_standard_annotations:
+        assert "invalid_gp_mf_relation" not in annot.failed_checks, (
+            f"enabled_by-based annotation incorrectly flagged: {annot.failed_checks}"
+        )
+
+
+def test_gp_mf_relation_allows_contributes_to():
+    builder = GoCamGraphBuilder(ontology_file)
+    gocam = builder.parse_ttl("resources/test/contributes_to_example.ttl")
+    flagged = [
+        a for a in gocam.non_standard_annotations
+        if "invalid_gp_mf_relation" in a.failed_checks
+    ]
+    assert flagged == [], f"contributes_to incorrectly flagged: {flagged}"
+    # Should remain standard
+    assert len(gocam.standard_annotations) == 1
+
+
+def test_gp_mf_relation_rejects_other_predicate():
+    builder = GoCamGraphBuilder(ontology_file)
+    gocam = builder.parse_ttl("resources/test/invalid_gp_mf_relation_example.ttl")
+    flagged_edges = set()
+    for a in gocam.non_standard_annotations:
+        flagged_edges |= a.failed_checks.get("invalid_gp_mf_relation", set())
+    assert len(flagged_edges) >= 1, (
+        "Annotation using a non-allowed GP-MF predicate should be flagged"
+    )
+    # And should land in non_standard_annotations
+    assert len(gocam.non_standard_annotations) == 1
+    assert len(gocam.standard_annotations) == 0
+
+
+# ---------------------------------------------------------------------------
+# TSV reporter integration (Task 4)
+# ---------------------------------------------------------------------------
+
+def test_print_non_standard_annotation_failed_checks_includes_gp_mf_relation():
+    builder = GoCamGraphBuilder(ontology_file)
+    gocam = builder.parse_ttl("resources/test/invalid_gp_mf_relation_example.ttl")
+    buf = io.StringIO()
+    builder.print_non_standard_annotation_failed_checks(gocam, buf)
+    contents = buf.getvalue()
+    assert "invalid_gp_mf_relation" in contents

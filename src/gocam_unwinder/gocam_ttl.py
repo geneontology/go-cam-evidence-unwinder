@@ -697,6 +697,22 @@ class GoCamGraphBuilder:
             return self.go_aspector.is_molecular_function(parsed_curies[0])
         return False
 
+    def _resolve_mf_type(self, type_node, graph):
+        """
+        Resolve `type_node` to an underlying MF URI, treating an
+        `owl:complementOf <GO_xxxxxxx>` class expression as the wrapped GO term.
+
+        Returns the MF URIRef if `type_node` is (or wraps) a molecular function;
+        None otherwise.
+        """
+        if isinstance(type_node, URIRef):
+            return type_node if self.uri_is_molecular_function(type_node) else None
+        if isinstance(type_node, rdflib.BNode):
+            for wrapped in graph.objects(type_node, rdflib.OWL.complementOf):
+                if isinstance(wrapped, URIRef) and self.uri_is_molecular_function(wrapped):
+                    return wrapped
+        return None
+
     def uri_is_biological_process(self, uri: URIRef) -> bool:
         """
         Check if the URI refers to a biological process in the GO ontology.
@@ -856,6 +872,44 @@ class GoCamGraphBuilder:
                     if "edge_without_evidence" not in failed_checks:
                         failed_checks["edge_without_evidence"] = set()
                     failed_checks["edge_without_evidence"].add(edge.bnode_id)
+
+            # Check 5: GP<->MF backbone must use `enabled_by` (MF as source) or
+            # `contributes to` / RO:0002326 (MF as target). NOT-qualified MFs
+            # are recognized via owl:complementOf class expressions.
+            # Annotations with at least one valid backbone edge pass; annotations
+            # with no valid backbone get every backbone-candidate edge flagged.
+            enabled_by = URIRef(relations.lookup_label("enabled by"))
+            contributes_to = URIRef(relations.lookup_label("contributes to"))
+            invalid_candidates = []
+            has_valid_backbone = False
+            for edge in std_annot.edges.values():
+                src_mf = self._resolve_mf_type(edge.source_type, go_cam_graph.g)
+                tgt_mf = self._resolve_mf_type(edge.target_type, go_cam_graph.g)
+                # Skip non-MF and MF<->MF edges (latter is mf_causal_mf's domain)
+                if (src_mf is None) == (tgt_mf is None):
+                    continue
+                if src_mf is not None:
+                    other_type = edge.target_type
+                    mf_on = "source"
+                else:
+                    other_type = edge.source_type
+                    mf_on = "target"
+                if not isinstance(other_type, URIRef):
+                    continue
+                other_curies = curie_util.contract_uri(str(other_type))
+                if other_curies:
+                    prefix = other_curies[0].split(":", 1)[0]
+                    if prefix in {"GO", "RO", "BFO"}:
+                        continue
+                # Backbone candidate: MF connected to a non-GO entity.
+                if mf_on == "source" and edge.property_uri == enabled_by:
+                    has_valid_backbone = True
+                elif mf_on == "target" and edge.property_uri == contributes_to:
+                    has_valid_backbone = True
+                else:
+                    invalid_candidates.append(edge.bnode_id)
+            if not has_valid_backbone and invalid_candidates:
+                failed_checks.setdefault("invalid_gp_mf_relation", set()).update(invalid_candidates)
 
             std_annot.failed_checks = failed_checks
 
