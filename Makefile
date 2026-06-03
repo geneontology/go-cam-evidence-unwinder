@@ -13,6 +13,11 @@ LEGO_JOURNAL := target/blazegraph-lego.jnl
 # Usage: make pipeline SKIP_LIST=path/to/true_gocam_skip_list.txt
 SKIP_LIST ?=
 
+# Whether to pass --split-evidence to the unwinder. Defaults to enabled.
+# Usage: make pipeline SPLIT_EVIDENCE=     (disable)
+#        make pipeline SPLIT_EVIDENCE=1    (enable, default)
+SPLIT_EVIDENCE ?= 1
+
 # Output directories and files
 MODELS_SPLIT := $(TARGET_DIR)/models_split
 MODELS_SPLIT_ORIG := $(TARGET_DIR)/models_split_orig
@@ -61,6 +66,10 @@ target/groups.yaml:
 pipeline: $(GPAD_DIFF)
 	@echo "Pipeline complete. Results in $(TARGET_DIR)/"
 
+# Just split evidence, don't run GPAD diff
+models_split: $(MODELS_SPLIT)
+	@echo "Pipeline complete. Results in $(TARGET_DIR)/"
+
 # Step 1: Run the unwinder to create split models
 $(MODELS_SPLIT): $(GO_ONTOLOGY) $(RO_ONTOLOGY) $(GROUPS_YAML)
 	mkdir -p $(MODELS_SPLIT)
@@ -73,7 +82,7 @@ $(MODELS_SPLIT): $(GO_ONTOLOGY) $(RO_ONTOLOGY) $(GROUPS_YAML)
 		--skip-prefix R-HSA \
 		--skip-prefix YeastPathways \
 		$(if $(SKIP_LIST),--skip-file $(SKIP_LIST),) \
-		--split-evidence \
+		$(if $(SPLIT_EVIDENCE),--split-evidence,) \
 		--output-dir $(MODELS_SPLIT) \
 		--report-file $(REPORT_FILE) \
 		--criteria-fail-report $(CRITERIA_FAIL_REPORT) \
