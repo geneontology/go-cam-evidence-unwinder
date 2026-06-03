@@ -8,6 +8,11 @@ RO_ONTOLOGY := target/ro_current.owl
 GROUPS_YAML := target/groups.yaml
 LEGO_JOURNAL := target/blazegraph-lego.jnl
 
+# Optional list of .ttl filenames to skip (one per line), e.g. true GO-CAMs.
+# Produce via gocam-py's fetch_true_go_cams.sh, then extract success model IDs as <id>.ttl.
+# Usage: make pipeline SKIP_LIST=path/to/true_gocam_skip_list.txt
+SKIP_LIST ?=
+
 # Output directories and files
 MODELS_SPLIT := $(TARGET_DIR)/models_split
 MODELS_SPLIT_ORIG := $(TARGET_DIR)/models_split_orig
@@ -21,6 +26,8 @@ GPAD_DIFF := $(TARGET_DIR)/gpad_diff.txt
 REPORT_FILE := $(TARGET_DIR)/noctua_models_graph_counts_$(DATE).tsv
 CRITERIA_FAIL_REPORT := $(TARGET_DIR)/models_split_criteria_failures_$(DATE).tsv
 DATE_CHANGE_REPORT := $(TARGET_DIR)/date_changes_$(DATE).tsv
+NON_STD_REPORT := $(TARGET_DIR)/remainders_report_$(DATE).tsv
+NON_STD_LOG := $(TARGET_DIR)/remainders_report_$(DATE).log
 
 # Default target
 .PHONY: all test clean pipeline
@@ -65,6 +72,7 @@ $(MODELS_SPLIT): $(GO_ONTOLOGY) $(RO_ONTOLOGY) $(GROUPS_YAML)
 		--skip-prefix SYNGO \
 		--skip-prefix R-HSA \
 		--skip-prefix YeastPathways \
+		$(if $(SKIP_LIST),--skip-file $(SKIP_LIST),) \
 		--split-evidence \
 		--output-dir $(MODELS_SPLIT) \
 		--report-file $(REPORT_FILE) \
@@ -139,6 +147,22 @@ $(GPAD_PROD): $(GPAD_EXPORT_PROD)
 $(GPAD_DIFF): $(GPAD_PROD) $(GPAD_DEV)
 	diff $(GPAD_PROD) $(GPAD_DEV) > $@ || true
 	@echo "GPAD diff written to $@"
+
+$(NON_STD_REPORT): $(GO_ONTOLOGY) $(RO_ONTOLOGY) $(GROUPS_YAML)
+	mkdir -p $(TARGET_DIR)
+	python3 debug_non_standard.py \
+		$(MODELS_DIR) \
+		-o $(GO_ONTOLOGY) \
+		-r $(RO_ONTOLOGY) \
+		--skip-prefix SYNGO \
+		--skip-prefix R-HSA \
+		--skip-prefix YeastPathways \
+		$(if $(SKIP_LIST),--skip-file $(SKIP_LIST),) \
+		--groups-yaml $(GROUPS_YAML) \
+		--tsv-output $@ | tee $(NON_STD_LOG)
+
+.PHONY: non_std
+non_std: $(NON_STD_REPORT)
 
 # Clean up generated files
 clean:

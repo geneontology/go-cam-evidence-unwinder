@@ -22,10 +22,42 @@ parser.add_argument('--report-file', help="Output file for statistics report (TS
 parser.add_argument('--criteria-fail-report', help="Output file for standard annotation criteria failure report (TSV format).")
 parser.add_argument('--skip-prefix', action='append', dest='skip_prefixes', metavar='PREFIX',
                     help="Skip files starting with PREFIX (can be specified multiple times, e.g., --skip-prefix SYNGO --skip-prefix R-HSA)")
+parser.add_argument('--skip-file', dest='skip_file', metavar='FILE',
+                    help="Skip TTL files whose filename appears in FILE (one .ttl filename per line, e.g. true GO-CAM models to exclude)")
 parser.add_argument('--groups-yaml', help="Path to groups.yaml for resolving group URIs to labels")
 parser.add_argument('--date-change-report', help="Output TSV file for date change report (model ID, title, original/new dates, edge labels)")
 
 GOCAM_RELATIONS = [str(r) for r in relations.__relation_label_lookup.values()]
+
+
+def load_skip_filenames(skip_file_path: str) -> set:
+    """Load a set of .ttl filenames to skip from a file (one filename per line)."""
+    with open(skip_file_path) as f:
+        return {line.strip() for line in f if line.strip()}
+
+
+def collect_model_files(models_folder, skip_prefixes=None, skip_filenames=None, model_id_filter=None):
+    """Return paths of .ttl files in models_folder, applying skip/filter rules.
+
+    - skip_prefixes: iterable of filename prefixes to skip (e.g. ["SYNGO", "R-HSA"])
+    - skip_filenames: set of exact .ttl filenames to skip (e.g. true GO-CAM models)
+    - model_id_filter: if not None, only include files whose stem (filename without
+      ".ttl") is in this set
+    """
+    skip_prefixes = skip_prefixes or []
+    skip_filenames = skip_filenames or set()
+    model_files = []
+    for f in os.listdir(models_folder):
+        if not f.endswith(".ttl"):
+            continue
+        if any(f.startswith(prefix) for prefix in skip_prefixes):
+            continue
+        if f in skip_filenames:
+            continue
+        if model_id_filter is not None and f.replace(".ttl", "") not in model_id_filter:
+            continue
+        model_files.append(os.path.join(models_folder, f))
+    return model_files
 
 
 def get_relation_descendants(ro_graph: rdflib.Graph, root_relation_uri: str) -> set:
@@ -984,18 +1016,19 @@ if __name__ == "__main__":
         with open(args.pathway_id_list, 'r') as f:
             model_id_filter = set(line.strip() for line in f if line.strip())
 
+    # Load skip-file filenames if provided (e.g. true GO-CAM models to exclude)
+    skip_filenames = load_skip_filenames(args.skip_file) if args.skip_file else set()
+
     model_files = []
     if args.model_filename:
         model_files.append(args.model_filename)
     elif args.models_folder:
-        for f in os.listdir(args.models_folder):
-            if f.endswith(".ttl"):
-                # Skip files that start with any of the specified prefixes
-                if args.skip_prefixes and any(f.startswith(prefix) for prefix in args.skip_prefixes):
-                    continue
-                # If filter is provided, only include models in the filter
-                if model_id_filter is None or f.replace(".ttl", "") in model_id_filter:
-                    model_files.append(os.path.join(args.models_folder, f))
+        model_files = collect_model_files(
+            args.models_folder,
+            skip_prefixes=args.skip_prefixes,
+            skip_filenames=skip_filenames,
+            model_id_filter=model_id_filter,
+        )
 
     go_cam_graph_builder = GoCamGraphBuilder(args.ontology_filename, args.ro_filename, args.groups_yaml)
 
