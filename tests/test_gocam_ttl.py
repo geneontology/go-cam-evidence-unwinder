@@ -1,12 +1,12 @@
 import io
+import os
 import pytest
 import rdflib
 from gocam_unwinder.gocam_ttl import GoCamGraph, GoCamGraphBuilder
 
 ontology_file = "target/go_20250601.json"  # TODO: Make this GitHub-friendly, maybe LFS
 
-def test_gocam_ttl():
-    builder = GoCamGraphBuilder(ontology_file)
+def test_gocam_ttl(builder):
 
     # Positive test case: MGI_MGI_1100089 has consistent evidence across edges
     gocam_graph = builder.parse_ttl("resources/test/MGI_MGI_1100089.ttl")  # Tnfsf11
@@ -45,7 +45,7 @@ def test_gocam_ttl():
     assert len(gocam_graph.standard_annotations) >= 0
 
 
-def test_multi_edge_evidence_grouping():
+def test_multi_edge_evidence_grouping(builder):
     """
     Test that evidence with identical metadata across multiple edges
     is properly grouped when splitting.
@@ -55,7 +55,6 @@ def test_multi_edge_evidence_grouping():
     together so that newly created multi-edge subgraphs retain the correct
     group of evidence individuals.
     """
-    builder = GoCamGraphBuilder(ontology_file)
     gocam_graph = builder.parse_ttl("resources/test/MGI_MGI_1100089.ttl")
 
     # Find the standard annotation with the multi-edge multi-evidence issue
@@ -182,13 +181,11 @@ def test_mf_causal_mf_filtering():
         "Should have at least as many non-standard annotations when MF-causal->MF filtering is applied"
 
 
-def test_print_non_standard_annotation_failed_checks():
+def test_print_non_standard_annotation_failed_checks(builder):
     """
     Test that print_non_standard_annotation_failed_checks outputs correct TSV format
     with model ID, title, failure reason, and term labels for source, predicate, object.
     """
-    ro_ontology_file = "resources/test/ro_20250723.owl"
-    builder = GoCamGraphBuilder(ontology_file, ro_ontology_file)
     gocam_graph = builder.parse_ttl("resources/test/5b318d0900000481.ttl")
 
     # Verify we have non-standard annotations to report
@@ -247,13 +244,12 @@ def test_print_non_standard_annotation_failed_checks():
     assert len(lines) == len(set(lines)), "Output should not contain duplicate rows"
 
 
-def test_print_non_standard_annotation_failed_checks_multiple_reasons():
+def test_print_non_standard_annotation_failed_checks_multiple_reasons(builder):
     """
     Test that print_non_standard_annotation_failed_checks correctly reports
     annotations that fail multiple checks.
     """
     # Use a model that has annotations failing the inconsistent_evidence check
-    builder = GoCamGraphBuilder(ontology_file)
     gocam_graph = builder.parse_ttl("resources/test/61452e3d00000323.ttl")
 
     # Verify we have non-standard annotations
@@ -279,7 +275,7 @@ def test_print_non_standard_annotation_failed_checks_multiple_reasons():
     assert len(inconsistent_lines) > 0, "Should have inconsistent_evidence failures"
 
 
-def test_edges_without_evidence():
+def test_edges_without_evidence(builder):
     """
     Test that edges without evidence are included in annotation subgraph assembly.
 
@@ -292,8 +288,6 @@ def test_edges_without_evidence():
     The no-evidence edge connects individual ...17 (GO:0030545, receptor ligand
     activity) to ...25 (GO:0004971, AMPA glutamate receptor activity).
     """
-    ro_ontology_file = "resources/test/ro_20250723.owl"
-    builder = GoCamGraphBuilder(ontology_file, ro_ontology_file)
     gocam_graph = builder.parse_ttl("resources/test/66c7d41500000016.ttl")
 
     # The two MF individuals that are bridged by the no-evidence causal edge
@@ -333,13 +327,11 @@ def test_edges_without_evidence():
     assert no_evidence_edge_found, "The no-evidence causal edge should be in the annotation"
 
 
-def test_edges_without_evidence_report_column():
+def test_edges_without_evidence_report_column(builder):
     """
     Test that the report includes a column counting edges without evidence.
     Issue #14: Report out models having edges without evidence.
     """
-    ro_ontology_file = "resources/test/ro_20250723.owl"
-    builder = GoCamGraphBuilder(ontology_file, ro_ontology_file)
     gocam_graph = builder.parse_ttl("resources/test/66c7d41500000016.ttl")
 
     # Count edges without evidence across all annotations
@@ -354,8 +346,7 @@ def test_edges_without_evidence_report_column():
     assert no_evidence_count == 1, f"Expected 1 edge without evidence, got {no_evidence_count}"
 
     # Also verify a model with all edges having evidence reports 0
-    builder_no_ro = GoCamGraphBuilder(ontology_file)
-    gocam_graph_all_ev = builder_no_ro.parse_ttl("resources/test/MGI_MGI_1100089.ttl")
+    gocam_graph_all_ev = builder.parse_ttl("resources/test/MGI_MGI_1100089.ttl")
 
     no_evidence_count_all = 0
     all_annotations_all = gocam_graph_all_ev.standard_annotations + gocam_graph_all_ev.non_standard_annotations
@@ -367,7 +358,7 @@ def test_edges_without_evidence_report_column():
     assert no_evidence_count_all == 0, f"MGI_MGI_1100089 should have 0 edges without evidence, got {no_evidence_count_all}"
 
 
-def test_no_evidence_edge_gocam_relations_filter():
+def test_no_evidence_edge_gocam_relations_filter(builder):
     """
     Regression test: model 57c82fad00000252 should be parsed as 1 non-standard annotation.
 
@@ -376,8 +367,6 @@ def test_no_evidence_edge_gocam_relations_filter():
     extracted and fed into the union-find, causing the model to be incorrectly
     split into 4 subgraphs (3 standard + 1 non-standard).
     """
-    ro_ontology_file = "resources/test/ro_20250723.owl"
-    builder = GoCamGraphBuilder(ontology_file, ro_ontology_file)
     gocam_graph = builder.parse_ttl("resources/test/57c82fad00000252.ttl")
 
     std_count = len(gocam_graph.standard_annotations)
@@ -389,7 +378,7 @@ def test_no_evidence_edge_gocam_relations_filter():
         f"Expected 1 non-standard annotation, got {non_std_count}"
 
 
-def test_edge_without_evidence_filter():
+def test_edge_without_evidence_filter(builder):
     """
     Test that annotations containing edges without evidence are marked non-standard
     with the 'edge_without_evidence' failed check.
@@ -398,8 +387,6 @@ def test_edge_without_evidence_filter():
     The annotation containing this edge should have 'edge_without_evidence' in
     its failed_checks, with the no-evidence edge's bnode ID recorded.
     """
-    ro_ontology_file = "resources/test/ro_20250723.owl"
-    builder = GoCamGraphBuilder(ontology_file, ro_ontology_file)
     gocam_graph = builder.parse_ttl("resources/test/66c7d41500000016.ttl")
 
     # The two MF individuals bridged by the no-evidence causal edge
@@ -429,14 +416,13 @@ def test_edge_without_evidence_filter():
             assert len(edge.evidence_uris) == 0, "Flagged edge should have no evidence"
 
     # Also verify that a model with all edges having evidence does NOT get this check
-    builder_no_ro = GoCamGraphBuilder(ontology_file)
-    gocam_graph_all_ev = builder_no_ro.parse_ttl("resources/test/MGI_MGI_1100089.ttl")
+    gocam_graph_all_ev = builder.parse_ttl("resources/test/MGI_MGI_1100089.ttl")
     for annot in gocam_graph_all_ev.standard_annotations:
         assert "edge_without_evidence" not in (annot.failed_checks or {}), \
             "Annotations with all edges having evidence should not fail this check"
 
 
-def test_edge_without_evidence_all_edges_no_evidence():
+def test_edge_without_evidence_all_edges_no_evidence(builder):
     """
     Test that an annotation where ALL edges lack evidence is marked non-standard
     with the 'edge_without_evidence' failed check.
@@ -446,8 +432,6 @@ def test_edge_without_evidence_all_edges_no_evidence():
     where all edges have no evidence. This tests the case where an entire annotation
     has zero evidence, not just a single bridging edge.
     """
-    ro_ontology_file = "resources/test/ro_20250723.owl"
-    builder = GoCamGraphBuilder(ontology_file, ro_ontology_file)
     gocam_graph = builder.parse_ttl("resources/test/67369e7600005491.ttl")
 
     # Find the individual typed as GO:0006954 (inflammatory response)
@@ -486,7 +470,7 @@ def test_edge_without_evidence_all_edges_no_evidence():
     assert len(actual_no_ev_edges) == 3, "Should have 3 edges without evidence"
 
 
-def test_date_tolerant_evidence_grouping():
+def test_date_tolerant_evidence_grouping(builder):
     """
     Test that evidence differing only in dc:date is grouped together.
 
@@ -496,7 +480,6 @@ def test_date_tolerant_evidence_grouping():
     same PMID, same contributor). These should be grouped together, and the
     date should be updated to the most recent (2023-02-13).
     """
-    builder = GoCamGraphBuilder(ontology_file)
     gocam_graph = builder.parse_ttl("resources/test/MGI_MGI_1101770.ttl")
 
     # Individual a9c5f5d3 is the Ring1 MF activity with date-differing evidence
@@ -520,14 +503,13 @@ def test_date_tolerant_evidence_grouping():
             f"Group {group_index} should have evidence from both edges"
 
 
-def test_date_update_on_split():
+def test_date_update_on_split(builder):
     """
     Test that after splitting, evidence nodes are updated to the most recent dc:date.
 
     Issue #15: When evidence is grouped across edges that have different dates,
     the split output should use the most recent date for all evidence in the group.
     """
-    builder = GoCamGraphBuilder(ontology_file)
     gocam_graph = builder.parse_ttl("resources/test/MGI_MGI_1101770.ttl")
 
     # Split and write
@@ -563,14 +545,13 @@ def test_date_update_on_split():
             f"Evidence {ev_uri} should have date 2023-02-13, got {str(dates[0])}"
 
 
-def test_date_change_report():
+def test_date_change_report(builder):
     """
     Test that splitting produces date change records with edge info.
 
     Issue #15: Records should include model ID, title, old date, new date,
     and source/predicate/target type URIs for each updated edge.
     """
-    builder = GoCamGraphBuilder(ontology_file)
     gocam_graph = builder.parse_ttl("resources/test/MGI_MGI_1101770.ttl")
 
     # Split and collect date change records
@@ -595,7 +576,7 @@ def test_date_change_report():
         assert target_label, "Target label should not be empty"
 
 
-def test_get_extension_edges():
+def test_get_extension_edges(builder):
     """
     Test that get_extension_edges() returns the non-backbone edges of a
     StandardAnnotation. Uses the GO:0120045 (stereocilium maintenance)
@@ -603,7 +584,6 @@ def test_get_extension_edges():
     - 2 backbone edges (MF-enabled_by->GP, MF-part_of->BP)
     - 3 extension edges (BP-part_of->BP, BP-occurs_in->CL, CL-part_of->EMAPA)
     """
-    builder = GoCamGraphBuilder(ontology_file)
     gocam_graph = builder.parse_ttl("resources/test/5966411600000001.ttl")
 
     # Locate the annotation containing the GO:0120045 individual.
@@ -674,7 +654,7 @@ def test_get_extension_edges():
         f"Backbone edges differ.\n  expected: {expected_backbone}\n  got:      {backbone_tuples_seen}"
 
 
-def test_get_primary_go_terms():
+def test_get_primary_go_terms(builder):
     """
     Test that get_primary_go_terms() returns the primary GO term URIs of an
     annotation, grouped by aspect ("MF", "BP", "CC"). Uses the GO:0120045
@@ -683,7 +663,6 @@ def test_get_primary_go_terms():
       - BP backbone (MF-part_of-BP)      -> primary BP = GO:0120045
       - No CC backbone                   -> "CC" key absent
     """
-    builder = GoCamGraphBuilder(ontology_file)
     gocam_graph = builder.parse_ttl("resources/test/5966411600000001.ttl")
 
     # Locate the annotation containing the GO:0120045 individual.
@@ -724,22 +703,19 @@ def test_get_primary_go_terms():
 # _resolve_mf_type() helper tests (Task 2)
 # ---------------------------------------------------------------------------
 
-def test_resolve_mf_type_direct_uri():
-    builder = GoCamGraphBuilder(ontology_file)
+def test_resolve_mf_type_direct_uri(builder):
     mf_uri = rdflib.URIRef("http://purl.obolibrary.org/obo/GO_0042802")  # identical protein binding (MF)
     g = rdflib.Graph()
     assert builder._resolve_mf_type(mf_uri, g) == mf_uri
 
 
-def test_resolve_mf_type_non_mf_uri_returns_none():
-    builder = GoCamGraphBuilder(ontology_file)
+def test_resolve_mf_type_non_mf_uri_returns_none(builder):
     bp_uri = rdflib.URIRef("http://purl.obolibrary.org/obo/GO_0006954")  # inflammatory response (BP)
     g = rdflib.Graph()
     assert builder._resolve_mf_type(bp_uri, g) is None
 
 
-def test_resolve_mf_type_complement_of_mf():
-    builder = GoCamGraphBuilder(ontology_file)
+def test_resolve_mf_type_complement_of_mf(builder):
     g = rdflib.Graph()
     g.parse(data='''
         @prefix owl: <http://www.w3.org/2002/07/owl#> .
@@ -762,8 +738,7 @@ def test_resolve_mf_type_complement_of_mf():
 # invalid_gp_mf_relation check tests (Task 3)
 # ---------------------------------------------------------------------------
 
-def test_gp_mf_relation_allows_enables():
-    builder = GoCamGraphBuilder(ontology_file)
+def test_gp_mf_relation_allows_enables(builder):
     gocam = builder.parse_ttl("resources/test/MGI_MGI_1100089.ttl")
     for annot in gocam.standard_annotations + gocam.non_standard_annotations:
         assert "invalid_gp_mf_relation" not in annot.failed_checks, (
@@ -771,8 +746,7 @@ def test_gp_mf_relation_allows_enables():
         )
 
 
-def test_gp_mf_relation_allows_contributes_to():
-    builder = GoCamGraphBuilder(ontology_file)
+def test_gp_mf_relation_allows_contributes_to(builder):
     gocam = builder.parse_ttl("resources/test/contributes_to_example.ttl")
     flagged = [
         a for a in gocam.non_standard_annotations
@@ -783,8 +757,7 @@ def test_gp_mf_relation_allows_contributes_to():
     assert len(gocam.standard_annotations) == 1
 
 
-def test_gp_mf_relation_rejects_other_predicate():
-    builder = GoCamGraphBuilder(ontology_file)
+def test_gp_mf_relation_rejects_other_predicate(builder):
     gocam = builder.parse_ttl("resources/test/invalid_gp_mf_relation_example.ttl")
     flagged_edges = set()
     for a in gocam.non_standard_annotations:
@@ -801,10 +774,37 @@ def test_gp_mf_relation_rejects_other_predicate():
 # TSV reporter integration (Task 4)
 # ---------------------------------------------------------------------------
 
-def test_print_non_standard_annotation_failed_checks_includes_gp_mf_relation():
-    builder = GoCamGraphBuilder(ontology_file)
+def test_print_non_standard_annotation_failed_checks_includes_gp_mf_relation(builder):
     gocam = builder.parse_ttl("resources/test/invalid_gp_mf_relation_example.ttl")
     buf = io.StringIO()
     builder.print_non_standard_annotation_failed_checks(gocam, buf)
     contents = buf.getvalue()
     assert "invalid_gp_mf_relation" in contents
+
+
+# ---------------------------------------------------------------------------
+# Model file collection: --skip-file / --skip-prefix / id-filter
+# ---------------------------------------------------------------------------
+
+def test_collect_model_files_skip_filenames(tmp_path):
+    from gocam_unwinder.gocam_ttl import collect_model_files
+    for name in ["a.ttl", "b.ttl", "c.ttl", "notes.txt"]:
+        (tmp_path / name).write_text("")
+    result = collect_model_files(str(tmp_path), skip_filenames={"b.ttl"})
+    names = sorted(os.path.basename(p) for p in result)
+    assert names == ["a.ttl", "c.ttl"]
+
+
+def test_collect_model_files_combines_filters(tmp_path):
+    from gocam_unwinder.gocam_ttl import collect_model_files
+    for name in ["SYNGO_1.ttl", "keep.ttl", "skipme.ttl", "drop.ttl"]:
+        (tmp_path / name).write_text("")
+    result = collect_model_files(
+        str(tmp_path),
+        skip_prefixes=["SYNGO"],
+        skip_filenames={"skipme.ttl"},
+        model_id_filter={"keep"},
+    )
+    names = sorted(os.path.basename(p) for p in result)
+    # SYNGO_1 skipped by prefix, skipme by filename, drop excluded by id filter
+    assert names == ["keep.ttl"]
