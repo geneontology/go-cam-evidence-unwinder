@@ -692,6 +692,18 @@ class GoCamGraphBuilder:
     # URI for the root causal relation
     CAUSALLY_UPSTREAM_OF_OR_WITHIN = "http://purl.obolibrary.org/obo/RO_0002418"
 
+    # Gene-product identifier namespaces, keyed by the identifiers.org path
+    # segment (http://identifiers.org/{key}/{id}). Sourced from the mod_id_space
+    # values in go-site metadata/goex.yaml, plus protein complexes (ComplexPortal)
+    # and the Protein Ontology (PR). Used to distinguish real gene products from
+    # anatomy/ontology entities (EMAPA, WBbt, CL, UBERON, ...) in the GP-MF
+    # backbone check. HGNC is intentionally excluded (human -> UniProtKB in goex).
+    GP_NAMESPACE_KEYS = {
+        "uniprot", "mgi", "sgd", "wormbase", "rgd", "zfin", "flybase",
+        "tair", "pombase", "japonicusdb", "cgd", "dictybase", "ecocyc",
+        "xenbase", "complexportal", "pr",
+    }
+
     def __init__(self, ontology_path, ro_ontology_path=None, groups_yaml_path=None):
         # Store and parse the GO ontology
         self.ontology = ontobio.ontol_factory.OntologyFactory().create(ontology_path)
@@ -743,6 +755,41 @@ class GoCamGraphBuilder:
             for wrapped in graph.objects(type_node, rdflib.OWL.complementOf):
                 if isinstance(wrapped, URIRef) and self.uri_is_molecular_function(wrapped):
                     return wrapped
+        return None
+
+    def _gene_product_namespace_key(self, type_uri):
+        """
+        Return the gene-product namespace key for a type URI, or None.
+
+        - {http,https}://identifiers.org/{seg}/... (or the compact colon form
+          .../{seg}:{id}) -> seg, truncated at the first '.' or ':', lowercased
+          (dictybase.gene -> dictybase, tair.locus -> tair, complexportal:CPX-1
+          -> complexportal; MGI's double-prefixed .../mgi/MGI:1100089 -> mgi)
+        - ComplexPortal host URLs (.../complexportal/...) -> "complexportal"
+        - Standard OBO PURLs (.../obo/PREFIX_local) -> PREFIX lowercased
+          (so PR_... -> "pr", GO_... -> "go", EMAPA_... -> "emapa")
+
+        Non-URIRef nodes and unrecognized URI shapes return None. The caller
+        decides which keys count as gene products via GP_NAMESPACE_KEYS.
+        """
+        if not isinstance(type_uri, URIRef):
+            return None
+        s = str(type_uri)
+        ident = "://identifiers.org/"
+        if ident in s:
+            seg = s.split(ident, 1)[1].split("/", 1)[0]
+            # Truncate sub-namespace ('.') and compact-form ID (':') suffixes:
+            # dictybase.gene -> dictybase, complexportal:CPX-566 -> complexportal.
+            return seg.split(".", 1)[0].split(":", 1)[0].lower() or None
+        if "/complexportal/" in s:
+            return "complexportal"
+        obo = "://purl.obolibrary.org/obo/"
+        if obo in s:
+            local = s.split(obo, 1)[1]
+            # Standard OBO term is PREFIX_localid with no further path/fragment;
+            # non-standard forms (e.g. reacto.owl#REACTO_...) are not GPs.
+            if "/" not in local and "#" not in local and "_" in local:
+                return local.split("_", 1)[0].lower()
         return None
 
     def uri_is_biological_process(self, uri: URIRef) -> bool:
@@ -906,12 +953,19 @@ class GoCamGraphBuilder:
                     failed_checks["edge_without_evidence"].add(edge.bnode_id)
 
             # Check 5: GP<->MF backbone must use `enabled_by` (MF as source) or
-            # `contributes to` / RO:0002326 (MF as target). NOT-qualified MFs
-            # are recognized via owl:complementOf class expressions.
-            # Annotations with at least one valid backbone edge pass; annotations
-            # with no valid backbone get every backbone-candidate edge flagged.
+            # `contributes to` / RO:0002326 (MF as target). NOT-qualified MFs are
+            # recognized via owl:complementOf class expressions. The non-MF
+            # endpoint must be a gene product (GP_NAMESPACE_KEYS) -- anatomy/
+            # ontology targets (EMAPA, WBbt, CL, ...) are extensions, not GPs.
+            # `has_input`/`has_output` are allowed MF->GP extension relations.
+            # Annotations with at least one valid backbone edge pass; those with
+            # no valid backbone get every invalid candidate edge flagged.
             enabled_by = URIRef(relations.lookup_label("enabled by"))
             contributes_to = URIRef(relations.lookup_label("contributes to"))
+            mf_source_extensions = {
+                URIRef(relations.lookup_label("has input")),
+                URIRef(relations.lookup_label("has output")),
+            }
             invalid_candidates = []
             has_valid_backbone = False
             for edge in std_annot.edges.values():
@@ -926,20 +980,22 @@ class GoCamGraphBuilder:
                 else:
                     other_type = edge.source_type
                     mf_on = "target"
-                if not isinstance(other_type, URIRef):
+                # Only MF<->gene-product edges are GP-MF backbone candidates.
+                # Anatomy/ontology targets resolve to keys absent from the set.
+                if self._gene_product_namespace_key(other_type) not in self.GP_NAMESPACE_KEYS:
                     continue
-                other_curies = curie_util.contract_uri(str(other_type))
-                if other_curies:
-                    prefix = other_curies[0].split(":", 1)[0]
-                    if prefix in {"GO", "RO", "BFO"}:
-                        continue
-                # Backbone candidate: MF connected to a non-GO entity.
-                if mf_on == "source" and edge.property_uri == enabled_by:
-                    has_valid_backbone = True
-                elif mf_on == "target" and edge.property_uri == contributes_to:
-                    has_valid_backbone = True
-                else:
-                    invalid_candidates.append(edge.bnode_id)
+                if mf_on == "source":
+                    if edge.property_uri == enabled_by:
+                        has_valid_backbone = True
+                    elif edge.property_uri in mf_source_extensions:
+                        continue  # allowed MF->GP extension (has_input/has_output)
+                    else:
+                        invalid_candidates.append(edge.bnode_id)
+                else:  # mf_on == "target"
+                    if edge.property_uri == contributes_to:
+                        has_valid_backbone = True
+                    else:
+                        invalid_candidates.append(edge.bnode_id)
             if not has_valid_backbone and invalid_candidates:
                 failed_checks.setdefault("invalid_gp_mf_relation", set()).update(invalid_candidates)
 

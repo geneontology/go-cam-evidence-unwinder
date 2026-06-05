@@ -200,6 +200,7 @@ When writing implementation plans, use the template at `docs/plans/PLAN-TEMPLATE
   - `uri_is_biological_process()`: Checks if a URI is a biological process using GoAspector
   - `uri_is_cellular_component()`: Checks if a URI is a cellular component using GoAspector
   - `uri_is_causal_relation()`: Checks if a URI is a causal relation (descendant of RO:0002418)
+  - `_gene_product_namespace_key()`: Maps an entity type URI to a gene-product namespace key (e.g. `http://identifiers.org/mgi/...` → `mgi`, the compact form `http://identifiers.org/PomBase:...` → `pombase`, ComplexPortal host URLs → `complexportal`, `obo/PR_...` → `pr`), or `None`. Used with the `GP_NAMESPACE_KEYS` class constant (allowlist) to identify gene products in the `invalid_gp_mf_relation` check
   - `term_label()`: Looks up human-readable labels for GO/RO/BFO terms from stored ontologies
   - `filter_out_non_std_annotations()`: Applies filtering checks and tracks failures
   - `print_non_standard_annotation_failed_checks()`: Outputs TSV report of failed checks with term labels
@@ -228,7 +229,7 @@ This ensures that all edges sharing individuals or transitively connected throug
 
 ### Standard Annotation Filtering
 
-The `filter_out_non_std_annotations()` method applies three filtering checks to every annotation. All checks are run on each annotation (no short-circuiting), and results are tracked per-edge in the `StandardAnnotation.failed_checks` dict.
+The `filter_out_non_std_annotations()` method applies five filtering checks to every annotation. All checks are run on each annotation (no short-circuiting), and results are tracked per-edge in the `StandardAnnotation.failed_checks` dict.
 
 #### Failed Checks Tracking
 
@@ -263,6 +264,13 @@ Each `StandardAnnotation` has a `failed_checks` attribute:
    - Flags any edge in the annotation that has no `lego:evidence` triple
    - When failed, only the no-evidence edges are recorded (not all edges)
    - This prevents annotations with incomplete provenance from being classified as standard
+
+5. **Invalid gene-product ↔ MF relation** (`invalid_gp_mf_relation`):
+   - Validates the relation on edges connecting a molecular function (MF) to a gene product (GP). A GP is identified by a namespace **allowlist** (`GP_NAMESPACE_KEYS`) via `_gene_product_namespace_key()`, sourced from the `mod_id_space` values in go-site `metadata/goex.yaml` plus ComplexPortal and PR (HGNC intentionally excluded). Anatomy/ontology targets (EMAPA, WBbt, CL, UBERON, ...) are **not** gene products and are ignored by this check (Issue #22 — the prior `{GO, RO, BFO}` blocklist misclassified them as GPs).
+   - Valid backbone relations: `enabled_by` (MF as source) or `contributes_to` / RO:0002326 (MF as target). NOT-qualified MFs are recognized via `owl:complementOf` class expressions (`_resolve_mf_type()`).
+   - `has_input` (RO:0002233) and `has_output` (RO:0002234) are allowed MF→GP extension relations, but **only in the MF-as-source direction** — they are accepted (neither flagged nor counted as a backbone). In the GP→MF direction only `contributes_to` is valid.
+   - An annotation passes if it has at least one valid backbone edge. If it has no valid backbone, every invalid gene-product↔MF edge is recorded.
+   - MF↔MF edges are out of scope here (handled by `mf_causal_mf`).
 
 #### Reporting
 
@@ -338,6 +346,10 @@ Tests use real GO-CAM model examples in `resources/test/`:
 - **5966411600000001.ttl**: Mouse stereocilium maintenance model with the `GO:0120045` BP annotation as a 5-edge subgraph
   - 2 backbone edges (`MF─enabled_by→GP`, `MF─part_of→BP`) plus 3 extension edges including the chain `BP─occurs_in→CL─part_of→EMAPA`
   - Used to test `get_extension_edges()` (backbone vs. extension classification across all three GO aspects)
+- **mf_occurs_in_anatomy_example.ttl**: Synthetic single-edge annotation `MF ─occurs_in→ WBbt:0006796` (anatomy) (Issue #22)
+  - Regression fixture for `invalid_gp_mf_relation`: under the old `{GO, RO, BFO}` blocklist the anatomy target was misclassified as a GP and falsely flagged; the `GP_NAMESPACE_KEYS` allowlist now correctly ignores it
+- **mf_to_gp_has_input_output_example.ttl**: Synthetic model with two single-edge annotations, `MF ─has_input→ GP` and `MF ─has_output→ GP` (MGI gene products) (Issue #22)
+  - Used to test that `has_input`/`has_output` are allowed MF→GP extension relations (not flagged by `invalid_gp_mf_relation`)
 
 The test requires the GO ontology file at `target/go_20250601.json` (downloaded via Makefile). The MF-causal->MF test also requires `resources/test/ro_20250723.owl`.
 
@@ -393,3 +405,8 @@ The test requires the GO ontology file at `target/go_20250601.json` (downloaded 
   - Returns exactly the 3 expected extension edges, identified by `(predicate, source_type, target_type)` tuples
   - Confirms the 2 remaining backbone edges (MF-enabled_by-GP and MF-part_of-BP) are not in the result
   - Searches both `standard_annotations` and `non_standard_annotations` since the method works regardless of classification
+- `test_gene_product_namespace_key()`: Unit test for `_gene_product_namespace_key()` (Issue #22):
+  - Maps MOD / ComplexPortal / PR URIs (including MGI's double-prefixed form and the PomBase compact-colon form `identifiers.org/PomBase:...`) to the expected `GP_NAMESPACE_KEYS` keys
+  - Confirms anatomy/ontology terms (EMAPA, WBbt, CL, UBERON, GO, RO, BFO, CHEBI) and HGNC resolve to keys absent from the allowlist, and non-URIRef nodes return `None`
+- `test_gp_mf_relation_ignores_anatomy_target()`: Verifies an `MF ─occurs_in→ WBbt` anatomy edge (mf_occurs_in_anatomy_example.ttl) is not flagged `invalid_gp_mf_relation` (Issue #22 regression)
+- `test_gp_mf_relation_allows_mf_to_gp_has_input_output()`: Verifies `MF ─has_input/has_output→ GP` edges (mf_to_gp_has_input_output_example.ttl) are not flagged `invalid_gp_mf_relation` (Issue #22)

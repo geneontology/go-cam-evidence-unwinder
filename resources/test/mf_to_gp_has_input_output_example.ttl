@@ -1,0 +1,54 @@
+<http://model.geneontology.org/mf_to_gp_has_input_output_example> a <http://www.w3.org/2002/07/owl#Ontology> ;
+	<http://geneontology.org/lego/modelstate> "production" ;
+	<http://purl.org/dc/elements/1.1/title> "MF has_input/has_output GP test fixture" ;
+	<http://purl.org/pav/providedBy> "http://informatics.jax.org" .
+
+<http://geneontology.org/lego/evidence> a <http://www.w3.org/2002/07/owl#AnnotationProperty> .
+<http://purl.org/dc/elements/1.1/contributor> a <http://www.w3.org/2002/07/owl#AnnotationProperty> .
+<http://purl.org/dc/elements/1.1/date> a <http://www.w3.org/2002/07/owl#AnnotationProperty> .
+<http://purl.org/dc/elements/1.1/source> a <http://www.w3.org/2002/07/owl#AnnotationProperty> .
+
+<http://purl.obolibrary.org/obo/RO_0002233> a <http://www.w3.org/2002/07/owl#ObjectProperty> .
+<http://purl.obolibrary.org/obo/RO_0002234> a <http://www.w3.org/2002/07/owl#ObjectProperty> .
+<http://purl.obolibrary.org/obo/GO_0042802> a <http://www.w3.org/2002/07/owl#Class> .
+<http://purl.obolibrary.org/obo/ECO_0000314> a <http://www.w3.org/2002/07/owl#Class> .
+<http://identifiers.org/mgi/MGI:1100089> a <http://www.w3.org/2002/07/owl#Class> .
+<http://identifiers.org/mgi/MGI:95574> a <http://www.w3.org/2002/07/owl#Class> .
+
+# Annotation 1: MF -has_input-> GP
+<http://model.geneontology.org/mf_to_gp_has_input_output_example/mf1>
+	a <http://www.w3.org/2002/07/owl#NamedIndividual> , <http://purl.obolibrary.org/obo/GO_0042802> ;
+	<http://purl.obolibrary.org/obo/RO_0002233> <http://model.geneontology.org/mf_to_gp_has_input_output_example/gp1> .
+<http://model.geneontology.org/mf_to_gp_has_input_output_example/gp1>
+	a <http://www.w3.org/2002/07/owl#NamedIndividual> , <http://identifiers.org/mgi/MGI:1100089> .
+<http://model.geneontology.org/mf_to_gp_has_input_output_example/ev1>
+	a <http://www.w3.org/2002/07/owl#NamedIndividual> , <http://purl.obolibrary.org/obo/ECO_0000314> ;
+	<http://purl.org/dc/elements/1.1/contributor> "https://orcid.org/0000-0003-3394-9805" ;
+	<http://purl.org/dc/elements/1.1/date> "2024-01-15" ;
+	<http://purl.org/dc/elements/1.1/source> "PMID:22222222" .
+[] a <http://www.w3.org/2002/07/owl#Axiom> ;
+	<http://www.w3.org/2002/07/owl#annotatedSource> <http://model.geneontology.org/mf_to_gp_has_input_output_example/mf1> ;
+	<http://www.w3.org/2002/07/owl#annotatedProperty> <http://purl.obolibrary.org/obo/RO_0002233> ;
+	<http://www.w3.org/2002/07/owl#annotatedTarget> <http://model.geneontology.org/mf_to_gp_has_input_output_example/gp1> ;
+	<http://geneontology.org/lego/evidence> <http://model.geneontology.org/mf_to_gp_has_input_output_example/ev1> ;
+	<http://purl.org/dc/elements/1.1/contributor> "https://orcid.org/0000-0003-3394-9805" ;
+	<http://purl.org/dc/elements/1.1/date> "2024-01-15" .
+
+# Annotation 2: MF -has_output-> GP
+<http://model.geneontology.org/mf_to_gp_has_input_output_example/mf2>
+	a <http://www.w3.org/2002/07/owl#NamedIndividual> , <http://purl.obolibrary.org/obo/GO_0042802> ;
+	<http://purl.obolibrary.org/obo/RO_0002234> <http://model.geneontology.org/mf_to_gp_has_input_output_example/gp2> .
+<http://model.geneontology.org/mf_to_gp_has_input_output_example/gp2>
+	a <http://www.w3.org/2002/07/owl#NamedIndividual> , <http://identifiers.org/mgi/MGI:95574> .
+<http://model.geneontology.org/mf_to_gp_has_input_output_example/ev2>
+	a <http://www.w3.org/2002/07/owl#NamedIndividual> , <http://purl.obolibrary.org/obo/ECO_0000314> ;
+	<http://purl.org/dc/elements/1.1/contributor> "https://orcid.org/0000-0003-3394-9805" ;
+	<http://purl.org/dc/elements/1.1/date> "2024-01-15" ;
+	<http://purl.org/dc/elements/1.1/source> "PMID:22222222" .
+[] a <http://www.w3.org/2002/07/owl#Axiom> ;
+	<http://www.w3.org/2002/07/owl#annotatedSource> <http://model.geneontology.org/mf_to_gp_has_input_output_example/mf2> ;
+	<http://www.w3.org/2002/07/owl#annotatedProperty> <http://purl.obolibrary.org/obo/RO_0002234> ;
+	<http://www.w3.org/2002/07/owl#annotatedTarget> <http://model.geneontology.org/mf_to_gp_has_input_output_example/gp2> ;
+	<http://geneontology.org/lego/evidence> <http://model.geneontology.org/mf_to_gp_has_input_output_example/ev2> ;
+	<http://purl.org/dc/elements/1.1/contributor> "https://orcid.org/0000-0003-3394-9805" ;
+	<http://purl.org/dc/elements/1.1/date> "2024-01-15" .

@@ -808,3 +808,76 @@ def test_collect_model_files_combines_filters(tmp_path):
     names = sorted(os.path.basename(p) for p in result)
     # SYNGO_1 skipped by prefix, skipme by filename, drop excluded by id filter
     assert names == ["keep.ttl"]
+
+
+# ---------------------------------------------------------------------------
+# GP namespace resolver (allowlist) — Issue #22
+# ---------------------------------------------------------------------------
+
+def test_gene_product_namespace_key(builder):
+    U = rdflib.URIRef
+
+    # Gene products -> namespace keys in GP_NAMESPACE_KEYS
+    gp_cases = {
+        "http://identifiers.org/mgi/MGI:1100089": "mgi",
+        "http://identifiers.org/sgd/S000005274": "sgd",
+        "http://identifiers.org/zfin/ZDB-GENE-060118-1": "zfin",
+        "http://identifiers.org/uniprot/P12345": "uniprot",
+        "http://identifiers.org/wormbase/WB:WBGene00000912": "wormbase",
+        "http://identifiers.org/rgd/RGD:61909": "rgd",
+        "http://identifiers.org/dictybase.gene/DDB_G0277853": "dictybase",
+        "http://identifiers.org/tair.locus/2200950": "tair",
+        "https://www.ebi.ac.uk/complexportal/complex/CPX-566": "complexportal",
+        "http://purl.obolibrary.org/obo/PR_000000001": "pr",
+        # Compact identifiers.org form ({seg}:{id} instead of {seg}/{id}).
+        # PomBase uses this real-world form, with a '.' inside the id portion.
+        "http://identifiers.org/PomBase:SPBC16D10.09": "pombase",
+        "https://identifiers.org/complexportal:CPX-566": "complexportal",
+        "https://identifiers.org/uniprot:P12345": "uniprot",
+    }
+    for uri, expected_key in gp_cases.items():
+        key = builder._gene_product_namespace_key(U(uri))
+        assert key == expected_key, f"{uri}: got {key!r}, expected {expected_key!r}"
+        assert key in builder.GP_NAMESPACE_KEYS, f"{uri}: key {key!r} not in GP_NAMESPACE_KEYS"
+
+    # Non-gene-products -> key absent from GP_NAMESPACE_KEYS (or None)
+    non_gp = [
+        "http://purl.obolibrary.org/obo/EMAPA_16894",
+        "http://purl.obolibrary.org/obo/WBbt_0006796",
+        "http://purl.obolibrary.org/obo/CL_0000066",
+        "http://purl.obolibrary.org/obo/UBERON_0000955",
+        "http://purl.obolibrary.org/obo/GO_0003674",
+        "http://purl.obolibrary.org/obo/RO_0002418",
+        "http://purl.obolibrary.org/obo/BFO_0000050",
+        "http://purl.obolibrary.org/obo/CHEBI_15367",
+    ]
+    for uri in non_gp:
+        assert builder._gene_product_namespace_key(U(uri)) not in builder.GP_NAMESPACE_KEYS, \
+            f"{uri} should not resolve to a GP namespace"
+
+    # HGNC is intentionally excluded from the allowlist
+    assert builder._gene_product_namespace_key(
+        U("http://identifiers.org/hgnc/HGNC:11998")) == "hgnc"
+    assert "hgnc" not in builder.GP_NAMESPACE_KEYS
+
+    # Non-URIRef (e.g. a blank node) -> None
+    assert builder._gene_product_namespace_key(rdflib.BNode()) is None
+
+
+def test_gp_mf_relation_ignores_anatomy_target(builder):
+    # MF -occurs_in-> WBbt anatomy is an extension, not a GP-MF backbone edge.
+    # Under the old {GO,RO,BFO} blocklist this was falsely flagged.
+    gocam = builder.parse_ttl("resources/test/mf_occurs_in_anatomy_example.ttl")
+    for annot in gocam.standard_annotations + gocam.non_standard_annotations:
+        assert "invalid_gp_mf_relation" not in annot.failed_checks, (
+            f"MF->anatomy edge incorrectly flagged: {annot.failed_checks}"
+        )
+
+
+def test_gp_mf_relation_allows_mf_to_gp_has_input_output(builder):
+    # has_input / has_output are valid MF->GP extension relations.
+    gocam = builder.parse_ttl("resources/test/mf_to_gp_has_input_output_example.ttl")
+    for annot in gocam.standard_annotations + gocam.non_standard_annotations:
+        assert "invalid_gp_mf_relation" not in annot.failed_checks, (
+            f"MF->GP has_input/has_output incorrectly flagged: {annot.failed_checks}"
+        )
