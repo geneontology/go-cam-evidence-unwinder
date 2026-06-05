@@ -1,3 +1,9 @@
+# Use bash so recipes can run `set -o pipefail` (the system make is GNU 3.81, which
+# silently ignores .SHELLFLAGS). Recipes that pipe a command into `tee` prepend
+# `set -o pipefail` so a crash in `python3 ... | tee log` is not hidden by tee's
+# exit 0 (which made `make` report "Pipeline complete" on a failed run).
+SHELL := /bin/bash
+
 # Configuration
 DATE := $(shell date +%Y%m%d)
 TARGET_DIR := target_$(DATE)
@@ -73,7 +79,7 @@ models_split: $(MODELS_SPLIT)
 # Step 1: Run the unwinder to create split models
 $(MODELS_SPLIT): $(GO_ONTOLOGY) $(RO_ONTOLOGY) $(GROUPS_YAML)
 	mkdir -p $(MODELS_SPLIT)
-	python3 src/gocam_unwinder/gocam_ttl.py \
+	set -o pipefail; python3 src/gocam_unwinder/gocam_ttl.py \
 		-d $(MODELS_DIR) \
 		-o $(GO_ONTOLOGY) \
 		-r $(RO_ONTOLOGY) \
@@ -159,7 +165,7 @@ $(GPAD_DIFF): $(GPAD_PROD) $(GPAD_DEV)
 
 $(NON_STD_REPORT): $(GO_ONTOLOGY) $(RO_ONTOLOGY) $(GROUPS_YAML)
 	mkdir -p $(TARGET_DIR)
-	python3 debug_non_standard.py \
+	set -o pipefail; python3 debug_non_standard.py \
 		$(MODELS_DIR) \
 		-o $(GO_ONTOLOGY) \
 		-r $(RO_ONTOLOGY) \
