@@ -1,0 +1,37 @@
+<http://model.geneontology.org/gp_bp_relation_example> a <http://www.w3.org/2002/07/owl#Ontology> ;
+	<http://geneontology.org/lego/modelstate> "production" ;
+	<http://purl.org/dc/elements/1.1/title> "GP-BP relation (#4) test fixture" ;
+	<http://purl.org/pav/providedBy> "http://informatics.jax.org" .
+
+<http://geneontology.org/lego/evidence> a <http://www.w3.org/2002/07/owl#AnnotationProperty> .
+<http://purl.org/dc/elements/1.1/date> a <http://www.w3.org/2002/07/owl#AnnotationProperty> .
+
+# PASS: GP -acts_upstream_of_or_within-> BP
+<http://model.geneontology.org/gp_bp_relation_example/gp1>
+	a <http://www.w3.org/2002/07/owl#NamedIndividual> , <http://identifiers.org/mgi/MGI:1100089> ;
+	<http://purl.obolibrary.org/obo/RO_0002264> <http://model.geneontology.org/gp_bp_relation_example/bp1> .
+<http://model.geneontology.org/gp_bp_relation_example/bp1>
+	a <http://www.w3.org/2002/07/owl#NamedIndividual> , <http://purl.obolibrary.org/obo/GO_0008286> .
+<http://model.geneontology.org/gp_bp_relation_example/ev1>
+	a <http://www.w3.org/2002/07/owl#NamedIndividual> , <http://purl.obolibrary.org/obo/ECO_0000314> ;
+	<http://purl.org/dc/elements/1.1/date> "2024-01-15" .
+[] a <http://www.w3.org/2002/07/owl#Axiom> ;
+	<http://www.w3.org/2002/07/owl#annotatedSource> <http://model.geneontology.org/gp_bp_relation_example/gp1> ;
+	<http://www.w3.org/2002/07/owl#annotatedProperty> <http://purl.obolibrary.org/obo/RO_0002264> ;
+	<http://www.w3.org/2002/07/owl#annotatedTarget> <http://model.geneontology.org/gp_bp_relation_example/bp1> ;
+	<http://geneontology.org/lego/evidence> <http://model.geneontology.org/gp_bp_relation_example/ev1> .
+
+# FAIL: GP -part_of-> BP  (part_of NOT accepted for GP->BP)
+<http://model.geneontology.org/gp_bp_relation_example/gp2>
+	a <http://www.w3.org/2002/07/owl#NamedIndividual> , <http://identifiers.org/mgi/MGI:95574> ;
+	<http://purl.obolibrary.org/obo/BFO_0000050> <http://model.geneontology.org/gp_bp_relation_example/bp2> .
+<http://model.geneontology.org/gp_bp_relation_example/bp2>
+	a <http://www.w3.org/2002/07/owl#NamedIndividual> , <http://purl.obolibrary.org/obo/GO_0008286> .
+<http://model.geneontology.org/gp_bp_relation_example/ev2>
+	a <http://www.w3.org/2002/07/owl#NamedIndividual> , <http://purl.obolibrary.org/obo/ECO_0000314> ;
+	<http://purl.org/dc/elements/1.1/date> "2024-01-15" .
+[] a <http://www.w3.org/2002/07/owl#Axiom> ;
+	<http://www.w3.org/2002/07/owl#annotatedSource> <http://model.geneontology.org/gp_bp_relation_example/gp2> ;
+	<http://www.w3.org/2002/07/owl#annotatedProperty> <http://purl.obolibrary.org/obo/BFO_0000050> ;
+	<http://www.w3.org/2002/07/owl#annotatedTarget> <http://model.geneontology.org/gp_bp_relation_example/bp2> ;
+	<http://geneontology.org/lego/evidence> <http://model.geneontology.org/gp_bp_relation_example/ev2> .

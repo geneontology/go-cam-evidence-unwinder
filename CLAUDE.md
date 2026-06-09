@@ -194,6 +194,13 @@ When writing implementation plans, use the template at `docs/plans/PLAN-TEMPLATE
   - `self.ontology`: GO ontology (via ontobio) for term lookups and MF classification
   - `self.ro_ontology`: RO ontology as rdflib.Graph (if provided) for causal relation hierarchy and labels
   - `self.groups_lookup`: Dict mapping group URIs to labels (from groups.yaml, if provided)
+- Class constants:
+  - `GP_NAMESPACE_KEYS`: Allowlist of gene-product namespace keys (mgi, sgd, uniprot, etc.)
+  - `CAUSALLY_UPSTREAM_OF_OR_WITHIN`: Root URI for the causal relation family (RO:0002418)
+  - `ACTS_UPSTREAM_OF_OR_WITHIN`: Root URI for the acts-upstream family (RO:0002264), used for checks #4 and #5
+  - `ROOT_GO_TERMS`: Set of the three GO aspect root PURLs (MF GO:0003674, BP GO:0008150, CC GO:0005575)
+  - `ANATOMY_NAMESPACE_KEYS`: Set of anatomy-ontology namespace keys (cl, uberon, emapa, wbbt, fbbt, zfa, ma, po)
+- Cached relation URIs (set in `__init__`): `rel_enabled_by`, `rel_contributes_to`, `rel_has_input`, `rel_has_output`, `rel_part_of`, `rel_located_in`, `rel_is_active_in`, `rel_occurs_in`; also `acts_upstream_relations` (set of RO:0002264 descendants, empty without RO) and `mf_bp_valid_relations` (combined set of valid MF→BP relations for the #11 cardinality check)
 - Key methods:
   - `parse_ttl()`: Parses a TTL file, extracts model metadata (including modelstate and groups with label resolution), and applies filtering
   - `uri_is_molecular_function()`: Checks if a URI is a molecular function using GoAspector
@@ -201,8 +208,14 @@ When writing implementation plans, use the template at `docs/plans/PLAN-TEMPLATE
   - `uri_is_cellular_component()`: Checks if a URI is a cellular component using GoAspector
   - `uri_is_causal_relation()`: Checks if a URI is a causal relation (descendant of RO:0002418)
   - `_gene_product_namespace_key()`: Maps an entity type URI to a gene-product namespace key (e.g. `http://identifiers.org/mgi/...` → `mgi`, the compact form `http://identifiers.org/PomBase:...` → `pombase`, ComplexPortal host URLs → `complexportal`, `obo/PR_...` → `pr`), or `None`. Used with the `GP_NAMESPACE_KEYS` class constant (allowlist) to identify gene products in the `invalid_gp_mf_relation` check
+  - `_go_aspect()`: Returns `"MF"` | `"BP"` | `"CC"` | `None` for an individual's type node; MF resolution is `owl:complementOf`-aware via `_resolve_mf_type()`
+  - `_is_root_go_term()`: Returns `True` if the type node is one of the three GO aspect root terms
+  - `_is_anatomical_structure()`: Returns `True` if the type is a GO CC or has a namespace key in `ANATOMY_NAMESPACE_KEYS`; used by the #12 cardinality check
+  - `_category()`: Returns the disjoint endpoint category (`"MF"` | `"BP"` | `"CC"` | `"GP"` | `"ANATOMY"` | `None`) for use in the relation-validity rule table
+  - `_build_relation_rules()`: Builds the declarative relation-validity rule table (list of dicts) for checks #3/#4/#5/#6/#10; RO-dependent rules (#4, #5) are appended only when an RO ontology is loaded
+  - `_matches_relation_rule()`: Tests whether an edge matches a rule's src/tgt categories and root/nonroot constraints
   - `term_label()`: Looks up human-readable labels for GO/RO/BFO terms from stored ontologies
-  - `filter_out_non_std_annotations()`: Applies filtering checks and tracks failures
+  - `filter_out_non_std_annotations()`: Applies all filtering checks and tracks failures
   - `print_non_standard_annotation_failed_checks()`: Outputs TSV report of failed checks with term labels
   - `get_extension_edges()`: Returns the edges of a `StandardAnnotation` that are annotation extensions (i.e., not part of the gene-product → MF/BP/CC backbone)
 
@@ -229,7 +242,7 @@ This ensures that all edges sharing individuals or transitively connected throug
 
 ### Standard Annotation Filtering
 
-The `filter_out_non_std_annotations()` method applies five filtering checks to every annotation. All checks are run on each annotation (no short-circuiting), and results are tracked per-edge in the `StandardAnnotation.failed_checks` dict.
+The `filter_out_non_std_annotations()` method applies filtering checks to every annotation. All checks are run on each annotation (no short-circuiting), and results are tracked per-edge in the `StandardAnnotation.failed_checks` dict.
 
 #### Failed Checks Tracking
 
@@ -249,10 +262,11 @@ Each `StandardAnnotation` has a `failed_checks` attribute:
    - **Passing example**: 2 edges with evidence [A, B] and [C, D], where metadata(A) == metadata(C) and metadata(B) == metadata(D) → 2 evidence groups, each with evidence from both edges
    - **Failing example**: 2 edges with evidence [A, B] and [C] → evidence group for A has no match from edge 2, inconsistent
 
-2. **Multiple part_of edges from molecular functions** (`multiple_mf_part_of`):
-   - Filters out annotations containing more than one MF-part_of->? edge within their annotation subgraph
-   - When failed, only the part_of edges are recorded (not all edges)
+2. **Multiple MF→BP edges** (`multiple_mf_bp`):
+   - Filters out annotations containing more than one MF→BP edge where the relation is in `part_of` (BFO:0000050) ∪ the `acts_upstream_of_or_within` (RO:0002264) family ∪ the `causally_upstream_of_or_within` (RO:0002418) family
+   - When failed, only the qualifying MF→BP edges are recorded (not all edges)
    - This prevents complex pathway models from being classified as standard annotations
+   - Previously named `multiple_mf_part_of`; broadened to cover all standard MF→BP relation types
 
 3. **Causal relation edges between two molecular function nodes** (`mf_causal_mf`, requires RO ontology):
    - If an RO ontology file is provided, filters out annotations containing causal relation edges (descendants of RO:0002418 "causally upstream of or within") where both source and target are molecular functions
@@ -271,6 +285,42 @@ Each `StandardAnnotation` has a `failed_checks` attribute:
    - `has_input` (RO:0002233) and `has_output` (RO:0002234) are allowed MF→GP extension relations, but **only in the MF-as-source direction** — they are accepted (neither flagged nor counted as a backbone). In the GP→MF direction only `contributes_to` is valid.
    - An annotation passes if it has at least one valid backbone edge. If it has no valid backbone, every invalid gene-product↔MF edge is recorded.
    - MF↔MF edges are out of scope here (handled by `mf_causal_mf`).
+
+6. **Invalid GP→CC relation** (`invalid_gp_cc_relation`):
+   - A gene product (GP) connected to a non-root GO cellular component (CC) must use `located_in` (RO:0001025)
+   - When failed, only the offending edge is recorded
+   - Implemented via the declarative relation-validity rule table
+
+7. **Invalid GP→BP relation** (`invalid_gp_bp_relation`, requires RO ontology):
+   - A gene product connected to any BP must use a relation in the `acts_upstream_of_or_within` (RO:0002264) family (the 11-member descendant set)
+   - When failed, only the offending edge is recorded
+   - Omitted when no RO ontology is loaded
+
+8. **Invalid root-MF→BP relation** (`invalid_mf_bp_relation`, requires RO ontology):
+   - A root MF individual connected to a non-root BP must use `part_of` OR a relation in the `acts_upstream_of_or_within` (RO:0002264) family OR the `causally_upstream_of_or_within` (RO:0002418) family
+   - The RO:0002418 family is included because the canonical MOD "BP-only annotation" (unknown/root MF causally upstream of a BP) uses it and must stay standard/splittable
+   - When failed, only the offending edge is recorded
+   - Omitted when no RO ontology is loaded
+
+9. **Invalid root-MF→CC relation** (`invalid_mf_cc_relation`):
+   - A root MF individual connected to a non-root GO CC must use `is_active_in` (RO:0002432)
+   - When failed, only the offending edge is recorded
+
+10. **Invalid BP→CC/anatomy relation** (`invalid_bp_cc_relation`):
+    - A BP individual connected to a GO CC or anatomy-ontology term (CL, UBERON, EMAPA, etc.) must use `occurs_in` (BFO:0000066)
+    - When failed, only the offending edge is recorded
+
+11. **Multiple MF→anatomy edges** (`multiple_mf_anatomy`):
+    - Flags annotations where a single MF individual has more than one outgoing edge to an anatomical structure (GO CC or anatomy-ontology term such as CL, UBERON, EMAPA, WBbt, etc.)
+    - When failed, all the qualifying MF→anatomy edges are recorded
+
+12. **Enabler is not a gene product** (`enabler_not_gp`):
+    - The target of an `enabled_by` edge (MF→enabler) must be a gene product (in `GP_NAMESPACE_KEYS`). Flags annotations where the enabler is a non-GP entity such as a GO term or ChEBI chemical.
+    - When failed, the offending `enabled_by` edge is recorded
+
+**Backbone-only gate:** The relation-validity checks 6–10 above (`invalid_gp_cc_relation`, `invalid_gp_bp_relation`, `invalid_mf_bp_relation`, `invalid_mf_cc_relation`, `invalid_bp_cc_relation`) validate the annotation **backbone** only. An edge is validated only if its relation is in `GoCamGraphBuilder.backbone_relations` — the recognized backbone/placement relations (`located_in`, `is_active_in`, `occurs_in`, `part_of`, plus the `acts_upstream_of_or_within` RO:0002264 and `causally_upstream_of_or_within` RO:0002418 families). Edges using any other relation are annotation **extensions** (e.g. `BP ─results_in_development_of→ anatomy`) and are left informational, not flagged. A *misused* placement relation (e.g. `located_in` on a `BP→CC` edge) is in `backbone_relations` and is still flagged. `occurs_in` is a recognized placement relation, so a `root-MF ─occurs_in→ CC` edge is validated by `invalid_mf_cc_relation` (the MF→CC placement must be `is_active_in`).
+
+**Note:** TSV rules #7, #8, #9 from `std_annot_rules.tsv` are informational only — they produce no `failed_checks` entry and do not affect standard/non-standard classification.
 
 #### Reporting
 
@@ -327,7 +377,7 @@ Tests use real GO-CAM model examples in `resources/test/`:
   - **Negative test case**: Has annotations with inconsistent evidence across edges (filtered out)
   - Multi-edge annotations do not have matching evidence metadata
 - **R-HSA-9937080.ttl**: Reactome pathway (0 standard, 1 non-standard)
-- **SYNGO_5371.ttl**: SynGO model (single-edge annotations pass consistency check)
+- **SYNGO_5371.ttl**: SynGO model. Its annotations pass the evidence-consistency check, but it has a `root-MF ─occurs_in→ CC` (presynapse) edge, which the `invalid_mf_cc_relation` check (#6) flags as non-standard — the MF→CC placement relation must be `is_active_in`, not `occurs_in` (so the model is now classified non-standard)
 - **5b318d0900000481.ttl**: Human kinase activation template model with MF-to-MF causal edges
   - Contains GO:0004672 (protein kinase activity) → RO:0002629 (directly positively regulates) → GO:0003700 (DNA-binding transcription factor activity)
   - Used to test MF-causal->MF filtering when RO ontology is provided
@@ -350,6 +400,22 @@ Tests use real GO-CAM model examples in `resources/test/`:
   - Regression fixture for `invalid_gp_mf_relation`: under the old `{GO, RO, BFO}` blocklist the anatomy target was misclassified as a GP and falsely flagged; the `GP_NAMESPACE_KEYS` allowlist now correctly ignores it
 - **mf_to_gp_has_input_output_example.ttl**: Synthetic model with two single-edge annotations, `MF ─has_input→ GP` and `MF ─has_output→ GP` (MGI gene products) (Issue #22)
   - Used to test that `has_input`/`has_output` are allowed MF→GP extension relations (not flagged by `invalid_gp_mf_relation`)
+- **bp_cc_relation_example.ttl**: Synthetic model with a passing `BP─occurs_in→CC` and a failing `BP─located_in→CL` edge
+  - Used to test `invalid_bp_cc_relation` check (#10): only the wrong-relation edge is flagged
+- **gp_cc_relation_example.ttl**: Synthetic model with a passing `GP─located_in→CC` and a failing `GP─part_of→CC` edge
+  - Used to test `invalid_gp_cc_relation` check (#3): only the wrong-relation edge is flagged
+- **gp_bp_relation_example.ttl**: Synthetic model with a passing `GP─acts_upstream_of_or_within→BP` and a failing `GP─part_of→BP` edge
+  - Used to test `invalid_gp_bp_relation` check (#4, RO-dependent): only the wrong-relation edge is flagged
+- **mf_bp_relation_example.ttl**: Synthetic model with a passing `root-MF─causally_upstream_of_or_within→BP` and a failing `root-MF─located_in→BP` edge
+  - Used to test `invalid_mf_bp_relation` check (#5, RO-dependent): only the wrong-relation edge is flagged
+- **mf_cc_relation_example.ttl**: Synthetic model with a passing `root-MF─is_active_in→CC` and a failing `root-MF─located_in→CC` edge
+  - Used to test `invalid_mf_cc_relation` check (#6): only the wrong-relation edge is flagged
+- **multi_mf_bp_example.ttl**: Synthetic annotation where one MF connects to two BPs via `part_of` and `acts_upstream_of_or_within`
+  - Used to test `multiple_mf_bp` cardinality check (#11): both MF→BP edges are flagged
+- **multi_mf_anatomy_example.ttl**: Synthetic annotation where one MF connects to a GO CC and a CL anatomy term
+  - Used to test `multiple_mf_anatomy` cardinality check (#12): both MF→anatomy edges are flagged
+- **enabler_not_gp_example.ttl**: Synthetic model with a passing `MF─enabled_by→MGI-GP` and a failing `MF─enabled_by→CHEBI` edge
+  - Used to test `enabler_not_gp` check (#13): only the ChEBI-enabled edge is flagged
 
 The test requires the GO ontology file at `target/go_20250601.json` (downloaded via Makefile). The MF-causal->MF test also requires `resources/test/ro_20250723.owl`.
 
@@ -410,3 +476,18 @@ The test requires the GO ontology file at `target/go_20250601.json` (downloaded 
   - Confirms anatomy/ontology terms (EMAPA, WBbt, CL, UBERON, GO, RO, BFO, CHEBI) and HGNC resolve to keys absent from the allowlist, and non-URIRef nodes return `None`
 - `test_gp_mf_relation_ignores_anatomy_target()`: Verifies an `MF ─occurs_in→ WBbt` anatomy edge (mf_occurs_in_anatomy_example.ttl) is not flagged `invalid_gp_mf_relation` (Issue #22 regression)
 - `test_gp_mf_relation_allows_mf_to_gp_has_input_output()`: Verifies `MF ─has_input/has_output→ GP` edges (mf_to_gp_has_input_output_example.ttl) are not flagged `invalid_gp_mf_relation` (Issue #22)
+- `test_relation_infrastructure()`: Verifies the new shared constants and cached relation URIs are populated correctly: `acts_upstream_relations` contains RO:0002264 and its descendants, `ROOT_GO_TERMS` has all three aspect roots, `ANATOMY_NAMESPACE_KEYS` includes `cl`/`uberon`, and all `rel_*` cached URIs resolve correctly
+- `test_go_aspect()`: Unit test for `_go_aspect()`: MF/BP/CC GO terms return the correct aspect, non-GO/anatomy/GP entities return `None`
+- `test_is_root_go_term()`: Unit test for `_is_root_go_term()`: the three root terms return `True`; non-root GO terms, BNodes, and `None` return `False`
+- `test_is_anatomical_structure()`: Unit test for `_is_anatomical_structure()`: GO CCs, CL, UBERON, EMAPA return `True`; GP, ChEBI, MF, BP return `False`
+- `test_category()`: Unit test for `_category()`: MF/BP/CC GO terms, GP (MGI/PR), and anatomy (CL) return the correct category string; ChEBI and `None` return `None`
+- `test_invalid_bp_cc_relation()`: Tests that only the wrong-relation `BP─located_in→CL` edge in bp_cc_relation_example.ttl is flagged under `invalid_bp_cc_relation`
+- `test_invalid_gp_cc_relation()`: Tests that only the wrong-relation `GP─part_of→CC` edge in gp_cc_relation_example.ttl is flagged under `invalid_gp_cc_relation`
+- `test_invalid_gp_bp_relation()`: Tests that only the wrong-relation `GP─part_of→BP` edge in gp_bp_relation_example.ttl is flagged under `invalid_gp_bp_relation`
+- `test_invalid_gp_bp_relation_skipped_without_ro()`: Verifies that `invalid_gp_bp_relation` is not recorded when no RO ontology is loaded
+- `test_invalid_mf_bp_relation()`: Tests that `part_of`/`causally_upstream_of_or_within` MF→BP edges in real fixtures pass, and only the wrong-relation `root-MF─located_in→BP` edge in mf_bp_relation_example.ttl is flagged
+- `test_invalid_mf_cc_relation()`: Tests that only the wrong-relation `root-MF─located_in→CC` edge in mf_cc_relation_example.ttl is flagged under `invalid_mf_cc_relation`
+- `test_relation_rules_ignore_extension_edges()`: Regression test for the backbone-only gate. Verifies `MGI_MGI_1100089.ttl` keeps its full 28 standard annotations and that its `BP→anatomy` extension edges (`results_in_development_of` RO:0002296, `results_in_acquisition_of_features_of` RO:0002315, `acts_on_population_of` RO:0012003) are NOT flagged by any relation-validity check
+- `test_multiple_mf_bp()`: Tests that both MF→BP edges in multi_mf_bp_example.ttl are flagged under `multiple_mf_bp` (the new key), and the old `multiple_mf_part_of` key is absent
+- `test_multiple_mf_anatomy()`: Tests that both MF→anatomy edges in multi_mf_anatomy_example.ttl are flagged under `multiple_mf_anatomy`
+- `test_enabler_not_gp()`: Tests that only the ChEBI-enabled edge in enabler_not_gp_example.ttl is flagged under `enabler_not_gp`

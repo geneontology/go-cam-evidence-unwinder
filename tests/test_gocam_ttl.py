@@ -216,8 +216,13 @@ def test_print_non_standard_annotation_failed_checks(builder):
         assert title, "Title should not be empty"
 
         # Failure reason should be one of the known check names
-        assert failure_reason in ["inconsistent_evidence", "multiple_mf_part_of", "mf_causal_mf", "edge_without_evidence"], \
-            f"Unknown failure reason: {failure_reason}"
+        assert failure_reason in [
+            "inconsistent_evidence", "multiple_mf_bp", "mf_causal_mf",
+            "edge_without_evidence", "invalid_gp_mf_relation",
+            "invalid_gp_cc_relation", "invalid_gp_bp_relation",
+            "invalid_mf_bp_relation", "invalid_mf_cc_relation",
+            "invalid_bp_cc_relation", "multiple_mf_anatomy", "enabler_not_gp",
+        ], f"Unknown failure reason: {failure_reason}"
 
         # Labels should be non-empty (either term labels or CURIEs)
         assert source_label, "Source label should not be empty"
@@ -881,3 +886,254 @@ def test_gp_mf_relation_allows_mf_to_gp_has_input_output(builder):
         assert "invalid_gp_mf_relation" not in annot.failed_checks, (
             f"MF->GP has_input/has_output incorrectly flagged: {annot.failed_checks}"
         )
+
+
+# ---------------------------------------------------------------------------
+# Tasks 1–5: shared infrastructure (constants, cached relation URIs, helpers)
+# ---------------------------------------------------------------------------
+
+def test_relation_infrastructure(builder):
+    # acts_upstream family loaded from RO (RO:0002264 + children)
+    au = builder.acts_upstream_relations
+    assert "http://purl.obolibrary.org/obo/RO_0002264" in au          # root of the family
+    assert "http://purl.obolibrary.org/obo/RO_0002331" in au          # involved in (child)
+    assert "http://purl.obolibrary.org/obo/RO_0002418" not in au      # separate branch
+    # root GO terms
+    assert "http://purl.obolibrary.org/obo/GO_0003674" in builder.ROOT_GO_TERMS
+    assert "http://purl.obolibrary.org/obo/GO_0008150" in builder.ROOT_GO_TERMS
+    assert "http://purl.obolibrary.org/obo/GO_0005575" in builder.ROOT_GO_TERMS
+    # anatomy namespace keys
+    assert "cl" in builder.ANATOMY_NAMESPACE_KEYS
+    assert "uberon" in builder.ANATOMY_NAMESPACE_KEYS
+    # cached relation URIs (all 8)
+    assert str(builder.rel_enabled_by) == "http://purl.obolibrary.org/obo/RO_0002333"
+    assert str(builder.rel_contributes_to) == "http://purl.obolibrary.org/obo/RO_0002326"
+    assert str(builder.rel_has_input) == "http://purl.obolibrary.org/obo/RO_0002233"
+    assert str(builder.rel_has_output) == "http://purl.obolibrary.org/obo/RO_0002234"
+    assert str(builder.rel_part_of) == "http://purl.obolibrary.org/obo/BFO_0000050"
+    assert str(builder.rel_located_in) == "http://purl.obolibrary.org/obo/RO_0001025"
+    assert str(builder.rel_is_active_in) == "http://purl.obolibrary.org/obo/RO_0002432"
+    assert str(builder.rel_occurs_in) == "http://purl.obolibrary.org/obo/BFO_0000066"
+
+
+def test_go_aspect(builder):
+    U = rdflib.URIRef
+    g = rdflib.Graph()  # empty graph: owl:complementOf lookup finds nothing,
+                        # so BNode inputs always resolve to None here
+    assert builder._go_aspect(U("http://purl.obolibrary.org/obo/GO_0042802"), g) == "MF"
+    assert builder._go_aspect(U("http://purl.obolibrary.org/obo/GO_0003674"), g) == "MF"  # root MF
+    assert builder._go_aspect(U("http://purl.obolibrary.org/obo/GO_0006954"), g) == "BP"
+    assert builder._go_aspect(U("http://purl.obolibrary.org/obo/GO_0005634"), g) == "CC"
+    # Non-GO entities are not an aspect
+    assert builder._go_aspect(U("http://identifiers.org/mgi/MGI:1100089"), g) is None
+    assert builder._go_aspect(U("http://purl.obolibrary.org/obo/CL_0000066"), g) is None
+    assert builder._go_aspect(None, g) is None
+    assert builder._go_aspect(rdflib.BNode(), g) is None  # unwrapped BNode -> None
+
+
+def test_is_root_go_term(builder):
+    U = rdflib.URIRef
+    assert builder._is_root_go_term(U("http://purl.obolibrary.org/obo/GO_0003674")) is True
+    assert builder._is_root_go_term(U("http://purl.obolibrary.org/obo/GO_0008150")) is True
+    assert builder._is_root_go_term(U("http://purl.obolibrary.org/obo/GO_0005575")) is True
+    assert builder._is_root_go_term(U("http://purl.obolibrary.org/obo/GO_0042802")) is False
+    assert builder._is_root_go_term(rdflib.BNode()) is False
+    assert builder._is_root_go_term(None) is False
+
+
+def test_is_anatomical_structure(builder):
+    U = rdflib.URIRef
+    # GO cellular components count as anatomical structures
+    assert builder._is_anatomical_structure(U("http://purl.obolibrary.org/obo/GO_0005634")) is True
+    # Anatomy-ontology terms count
+    assert builder._is_anatomical_structure(U("http://purl.obolibrary.org/obo/CL_0000066")) is True
+    assert builder._is_anatomical_structure(U("http://purl.obolibrary.org/obo/UBERON_0000955")) is True
+    assert builder._is_anatomical_structure(U("http://purl.obolibrary.org/obo/EMAPA_16894")) is True
+    # Non-anatomy: gene product, chemical, MF, BP
+    assert builder._is_anatomical_structure(U("http://identifiers.org/mgi/MGI:1100089")) is False
+    assert builder._is_anatomical_structure(U("http://purl.obolibrary.org/obo/CHEBI_15367")) is False
+    assert builder._is_anatomical_structure(U("http://purl.obolibrary.org/obo/GO_0042802")) is False
+    assert builder._is_anatomical_structure(U("http://purl.obolibrary.org/obo/GO_0006954")) is False
+
+
+def test_category(builder):
+    U = rdflib.URIRef
+    g = rdflib.Graph()
+    assert builder._category(U("http://purl.obolibrary.org/obo/GO_0042802"), g) == "MF"
+    assert builder._category(U("http://purl.obolibrary.org/obo/GO_0006954"), g) == "BP"
+    assert builder._category(U("http://purl.obolibrary.org/obo/GO_0005634"), g) == "CC"
+    assert builder._category(U("http://identifiers.org/mgi/MGI:1100089"), g) == "GP"
+    assert builder._category(U("http://purl.obolibrary.org/obo/PR_000000001"), g) == "GP"
+    assert builder._category(U("http://purl.obolibrary.org/obo/CL_0000066"), g) == "ANATOMY"
+    assert builder._category(U("http://purl.obolibrary.org/obo/CHEBI_15367"), g) is None
+    assert builder._category(None, g) is None
+
+
+# ---------------------------------------------------------------------------
+# Shared helper for Tasks 6–10 tests
+# ---------------------------------------------------------------------------
+
+def _flagged_props(gocam, key):
+    """Return the set of property-URI strings flagged under `key` across all annotations."""
+    props = set()
+    for annot in gocam.standard_annotations + gocam.non_standard_annotations:
+        for bnode_id in annot.failed_checks.get(key, set()):
+            props.add(str(annot.edges[bnode_id].property_uri))
+    return props
+
+
+# ---------------------------------------------------------------------------
+# Task 6: Rule #10 — BP->CC/anatomy must be occurs_in
+# ---------------------------------------------------------------------------
+
+def test_invalid_bp_cc_relation(builder):
+    gocam = builder.parse_ttl("resources/test/bp_cc_relation_example.ttl")
+    # Only the located_in BP->CL edge is flagged; the occurs_in edge is not.
+    assert _flagged_props(gocam, "invalid_bp_cc_relation") == {
+        "http://purl.obolibrary.org/obo/RO_0001025"
+    }
+
+
+# ---------------------------------------------------------------------------
+# Task 7: Rule #3 — GP->non-root CC must be located_in
+# ---------------------------------------------------------------------------
+
+def test_invalid_gp_cc_relation(builder):
+    gocam = builder.parse_ttl("resources/test/gp_cc_relation_example.ttl")
+    # Only the part_of GP->CC edge is flagged; the located_in edge is not.
+    assert _flagged_props(gocam, "invalid_gp_cc_relation") == {
+        "http://purl.obolibrary.org/obo/BFO_0000050"
+    }
+
+
+# ---------------------------------------------------------------------------
+# Task 8: Rule #4 — GP->BP must be acts_upstream_of_or_within or child
+# ---------------------------------------------------------------------------
+
+def test_invalid_gp_bp_relation(builder):
+    gocam = builder.parse_ttl("resources/test/gp_bp_relation_example.ttl")
+    # part_of GP->BP is flagged; acts_upstream_of_or_within is not.
+    assert _flagged_props(gocam, "invalid_gp_bp_relation") == {
+        "http://purl.obolibrary.org/obo/BFO_0000050"
+    }
+
+
+def test_invalid_gp_bp_relation_skipped_without_ro():
+    # #4 is RO-dependent; without an RO ontology it is omitted from the table,
+    # so a wrong GP->BP relation is NOT flagged.
+    builder_no_ro = GoCamGraphBuilder(ontology_file)
+    gocam = builder_no_ro.parse_ttl("resources/test/gp_bp_relation_example.ttl")
+    for annot in gocam.standard_annotations + gocam.non_standard_annotations:
+        assert "invalid_gp_bp_relation" not in annot.failed_checks
+
+
+# ---------------------------------------------------------------------------
+# Task 9: Rule #5 — root-MF->non-root BP must be part_of or acts_upstream family
+# ---------------------------------------------------------------------------
+
+def test_invalid_mf_bp_relation(builder):
+    # PASS: root-MF -part_of-> BP in 5966411600000001 is accepted (part_of OK for MF->BP).
+    ok = builder.parse_ttl("resources/test/5966411600000001.ttl")
+    for annot in ok.standard_annotations + ok.non_standard_annotations:
+        assert "invalid_mf_bp_relation" not in annot.failed_checks, \
+            "root-MF -part_of-> BP should be accepted"
+
+    # PASS: root-MF -RO:0002418(causally_upstream)-> BP in MGI_MGI_1100089 is the
+    # canonical MOD BP-only annotation pattern and is accepted (2026-06-09 decision).
+    mgi = builder.parse_ttl("resources/test/MGI_MGI_1100089.ttl")
+    assert "http://purl.obolibrary.org/obo/RO_0002418" not in \
+        _flagged_props(mgi, "invalid_mf_bp_relation"), \
+        "root-MF -causally_upstream_of_or_within-> BP should be accepted"
+
+    # Dedicated fixture: RO:0002418 edge passes; a located_in edge (wrong relation
+    # for MF->BP) is the only one flagged.
+    fix = builder.parse_ttl("resources/test/mf_bp_relation_example.ttl")
+    assert _flagged_props(fix, "invalid_mf_bp_relation") == {
+        "http://purl.obolibrary.org/obo/RO_0001025"
+    }
+
+
+# ---------------------------------------------------------------------------
+# Task 10: Rule #6 — root-MF->non-root CC must be is_active_in
+# ---------------------------------------------------------------------------
+
+def test_invalid_mf_cc_relation(builder):
+    gocam = builder.parse_ttl("resources/test/mf_cc_relation_example.ttl")
+    # located_in root-MF->CC is flagged; is_active_in is not.
+    assert _flagged_props(gocam, "invalid_mf_cc_relation") == {
+        "http://purl.obolibrary.org/obo/RO_0001025"
+    }
+
+
+def test_relation_rules_ignore_extension_edges(builder):
+    """Regression: the relation-validity rules (#3/#4/#5/#6/#10) validate the
+    BACKBONE only. Edges using non-placement (extension) relations must NOT be
+    flagged. MGI_MGI_1100089 contains BP->anatomy extension edges
+    (results_in_development_of RO:0002296, results_in_acquisition_of_features_of
+    RO:0002315, acts_on_population_of RO:0012003) alongside backbone occurs_in
+    placements; none of the extension edges should be flagged, and the model
+    must keep its full count of standard annotations (regression guard for the
+    over-flagging bug found in review)."""
+    g = builder.parse_ttl("resources/test/MGI_MGI_1100089.ttl")
+    assert len(g.standard_annotations) == 28, \
+        f"expected 28 standard annotations, got {len(g.standard_annotations)}"
+
+    extension_rels = {
+        "http://purl.obolibrary.org/obo/RO_0002296",  # results in development of
+        "http://purl.obolibrary.org/obo/RO_0002315",  # results in acquisition of features of
+        "http://purl.obolibrary.org/obo/RO_0012003",  # acts on population of
+    }
+    for key in ("invalid_bp_cc_relation", "invalid_gp_cc_relation",
+                "invalid_mf_cc_relation", "invalid_gp_bp_relation",
+                "invalid_mf_bp_relation"):
+        assert _flagged_props(g, key).isdisjoint(extension_rels), \
+            f"{key} wrongly flagged an extension relation in MGI_MGI_1100089"
+
+
+# ---------------------------------------------------------------------------
+# Task 11: #11 cardinality — multiple_mf_bp
+# ---------------------------------------------------------------------------
+
+def test_multiple_mf_bp(builder):
+    gocam = builder.parse_ttl("resources/test/multi_mf_bp_example.ttl")
+    annots = gocam.standard_annotations + gocam.non_standard_annotations
+    # The old key must be gone everywhere.
+    for annot in annots:
+        assert "multiple_mf_part_of" not in annot.failed_checks, "old key must be gone"
+    # Both MF->BP edges are flagged: the part_of one and the acts_upstream one
+    # (not, e.g., the wrong edge twice).
+    assert _flagged_props(gocam, "multiple_mf_bp") == {
+        "http://purl.obolibrary.org/obo/BFO_0000050",   # part_of
+        "http://purl.obolibrary.org/obo/RO_0002264",    # acts_upstream_of_or_within
+    }
+    # And exactly two edges total are flagged.
+    flagged = set()
+    for annot in annots:
+        flagged |= annot.failed_checks.get("multiple_mf_bp", set())
+    assert len(flagged) == 2, f"both MF->BP edges should be flagged, got {len(flagged)}"
+
+
+# ---------------------------------------------------------------------------
+# Task 12: #12 cardinality — multiple_mf_anatomy
+# ---------------------------------------------------------------------------
+
+def test_multiple_mf_anatomy(builder):
+    gocam = builder.parse_ttl("resources/test/multi_mf_anatomy_example.ttl")
+    flagged = set()
+    for annot in gocam.standard_annotations + gocam.non_standard_annotations:
+        flagged |= annot.failed_checks.get("multiple_mf_anatomy", set())
+    assert len(flagged) == 2, f"both MF->anatomy edges should be flagged, got {len(flagged)}"
+
+
+# ---------------------------------------------------------------------------
+# Task 13: #13 — enabler_not_gp
+# ---------------------------------------------------------------------------
+
+def test_enabler_not_gp(builder):
+    gocam = builder.parse_ttl("resources/test/enabler_not_gp_example.ttl")
+    # Only the ChEBI enabler is flagged; the MGI enabler is not.
+    flagged_targets = set()
+    for annot in gocam.standard_annotations + gocam.non_standard_annotations:
+        for bnode_id in annot.failed_checks.get("enabler_not_gp", set()):
+            flagged_targets.add(str(annot.edges[bnode_id].target_type))
+    assert flagged_targets == {"http://purl.obolibrary.org/obo/CHEBI_15367"}

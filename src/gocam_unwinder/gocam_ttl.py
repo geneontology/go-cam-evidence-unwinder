@@ -704,6 +704,25 @@ class GoCamGraphBuilder:
         "xenbase", "complexportal", "pr",
     }
 
+    # Root of the "acts upstream of or within" relation family (#4, #5)
+    ACTS_UPSTREAM_OF_OR_WITHIN = "http://purl.obolibrary.org/obo/RO_0002264"
+
+    # Aspect root terms (full OBO PURLs). Used to distinguish root vs non-root
+    # GO terms in the relation/cardinality checks.
+    ROOT_GO_TERMS = {
+        "http://purl.obolibrary.org/obo/GO_0003674",  # molecular_function
+        "http://purl.obolibrary.org/obo/GO_0008150",  # biological_process
+        "http://purl.obolibrary.org/obo/GO_0005575",  # cellular_component
+    }
+
+    # Anatomical-structure namespaces, keyed like GP_NAMESPACE_KEYS (the OBO PURL
+    # prefix / identifiers.org path segment from _gene_product_namespace_key).
+    # Distinguishes anatomy targets (CL, UBERON, EMAPA, ...) from gene products
+    # for #10 (BP->CC/anatomy) and #12 (MF->anatomy cardinality).
+    ANATOMY_NAMESPACE_KEYS = {
+        "cl", "uberon", "emapa", "wbbt", "fbbt", "zfa", "ma", "po",
+    }
+
     def __init__(self, ontology_path, ro_ontology_path=None, groups_yaml_path=None):
         # Store and parse the GO ontology
         self.ontology = ontobio.ontol_factory.OntologyFactory().create(ontology_path)
@@ -718,10 +737,51 @@ class GoCamGraphBuilder:
         else:
             self.causal_relations = set()
 
+        # "acts upstream of or within" family (#4, #5). Empty without RO ->
+        # those two rules are skipped (see _build_relation_rules).
+        if self.ro_ontology is not None:
+            self.acts_upstream_relations = get_relation_descendants(
+                self.ro_ontology, self.ACTS_UPSTREAM_OF_OR_WITHIN)
+        else:
+            self.acts_upstream_relations = set()
+
         # Load groups lookup if provided
         self.groups_lookup = {}
         if groups_yaml_path:
             self.groups_lookup = load_groups_lookup(groups_yaml_path)
+
+        # Relation URIs resolved once and reused across all criteria checks.
+        self.rel_enabled_by     = URIRef(relations.lookup_label("enabled by"))      # RO:0002333
+        self.rel_contributes_to = URIRef(relations.lookup_label("contributes to"))  # RO:0002326
+        self.rel_has_input      = URIRef(relations.lookup_label("has input"))       # RO:0002233
+        self.rel_has_output     = URIRef(relations.lookup_label("has output"))      # RO:0002234
+        self.rel_part_of        = URIRef(relations.lookup_label("part of"))         # BFO:0000050
+        self.rel_located_in     = URIRef(relations.lookup_label("located in"))      # RO:0001025
+        self.rel_is_active_in   = URIRef(relations.lookup_label("is active in"))    # RO:0002432
+        self.rel_occurs_in      = URIRef(relations.lookup_label("occurs in"))       # BFO:0000066
+        self.relation_rules = self._build_relation_rules()
+
+        # Valid MF->BP relations for the #11 cardinality count. Sourced from the
+        # #5 rule's `valid` set when present (RO loaded) so the two can never
+        # diverge; else the part_of-only fallback (the upstream/causal families
+        # require RO). Built once -- it does not change per annotation.
+        _mf_bp_rule = next((r for r in self.relation_rules
+                            if r["key"] == "invalid_mf_bp_relation"), None)
+        self.mf_bp_valid_relations = (
+            _mf_bp_rule["valid"] if _mf_bp_rule
+            else {str(self.rel_part_of)} | set(self.acts_upstream_relations) | set(self.causal_relations))
+
+        # The recognized backbone/placement relations. The relation-validity
+        # rules (#3/#4/#5/#6/#10) only validate edges whose relation is in this
+        # set; edges using any other relation are annotation extensions (e.g.
+        # BP -results_in_development_of-> anatomy) and are left informational
+        # (consistent with #7/#8/#9). A *misused* placement relation (e.g.
+        # located_in on a BP->CC edge, where occurs_in is required) is still in
+        # this set and therefore still flagged by its rule.
+        self.backbone_relations = (
+            {str(self.rel_located_in), str(self.rel_is_active_in),
+             str(self.rel_occurs_in), str(self.rel_part_of)}
+            | set(self.acts_upstream_relations) | set(self.causal_relations))
 
     def uri_is_causal_relation(self, uri: URIRef) -> bool:
         """
@@ -756,6 +816,108 @@ class GoCamGraphBuilder:
                 if isinstance(wrapped, URIRef) and self.uri_is_molecular_function(wrapped):
                     return wrapped
         return None
+
+    def _go_aspect(self, type_node, graph):
+        """Return "MF" | "BP" | "CC" | None for an individual's type node.
+
+        MF resolution goes through _resolve_mf_type (NOT/owl:complementOf aware);
+        BP/CC use the GoAspector classifiers. Single entry point so every check
+        classifies aspect identically.
+        """
+        if self._resolve_mf_type(type_node, graph) is not None:
+            return "MF"
+        if isinstance(type_node, URIRef):
+            if self.uri_is_biological_process(type_node):
+                return "BP"
+            if self.uri_is_cellular_component(type_node):
+                return "CC"
+        return None
+
+    def _is_root_go_term(self, type_node):
+        """True if type_node is one of the three GO aspect root terms."""
+        return isinstance(type_node, URIRef) and str(type_node) in self.ROOT_GO_TERMS
+
+    def _is_anatomical_structure(self, type_node):
+        """True if the target is a GO cellular component OR its namespace key
+        is in ANATOMY_NAMESPACE_KEYS (CL, UBERON, EMAPA, ...). Used by #12
+        (MF->anatomy cardinality). Note: #10 does NOT call this -- it uses
+        _category with target categories {"CC", "ANATOMY"} instead.
+
+        Note: _category() returns "CC" (not "ANATOMY") for GO cellular components,
+        so _is_anatomical_structure and _category are NOT equivalent for GO CC
+        terms. Use _is_anatomical_structure when the caller needs to treat CC and
+        anatomy-ontology terms uniformly (e.g. the MF->anatomy cardinality check)."""
+        if isinstance(type_node, URIRef) and self.uri_is_cellular_component(type_node):
+            return True
+        return self._gene_product_namespace_key(type_node) in self.ANATOMY_NAMESPACE_KEYS
+
+    def _category(self, type_node, graph):
+        """Disjoint endpoint category for an edge: "MF" | "BP" | "CC" | "GP" |
+        "ANATOMY" | None. GO terms resolve to their aspect; otherwise a
+        gene-product namespace -> "GP", an anatomy namespace -> "ANATOMY"."""
+        aspect = self._go_aspect(type_node, graph)
+        if aspect:
+            return aspect
+        key = self._gene_product_namespace_key(type_node)
+        if key in self.GP_NAMESPACE_KEYS:
+            return "GP"
+        if key in self.ANATOMY_NAMESPACE_KEYS:
+            return "ANATOMY"
+        return None
+
+    def _build_relation_rules(self):
+        """Declarative relation-validity table. Static rules (#10, #3, #6) are
+        listed first; RO-dependent rules (#4, #5) are appended last and only
+        when an RO ontology is loaded (their valid sets need the relation
+        descendant families).
+
+        Each rule: src/tgt are sets of endpoint categories (_category);
+        src_root_mf requires the source to be the root MF (always False on the
+        GP/BP-source rules); tgt_nonroot requires a non-root target; valid is the
+        set of acceptable property-URI strings.
+        """
+        rules = [
+            # #10  BP -> CC/anatomy : occurs_in
+            {"key": "invalid_bp_cc_relation", "src": {"BP"}, "tgt": {"CC", "ANATOMY"},
+             "src_root_mf": False, "tgt_nonroot": False,
+             "valid": {str(self.rel_occurs_in)}},
+            # #3  GP -> non-root CC : located_in
+            {"key": "invalid_gp_cc_relation", "src": {"GP"}, "tgt": {"CC"},
+             "src_root_mf": False, "tgt_nonroot": True,
+             "valid": {str(self.rel_located_in)}},
+            # #6  root-MF -> non-root CC : is_active_in
+            {"key": "invalid_mf_cc_relation", "src": {"MF"}, "tgt": {"CC"},
+             "src_root_mf": True, "tgt_nonroot": True,
+             "valid": {str(self.rel_is_active_in)}},
+        ]
+        if self.acts_upstream_relations:
+            upstream = set(self.acts_upstream_relations)
+            rules.append(
+                # #4  GP -> BP (incl. root) : acts_upstream_of_or_within + children
+                {"key": "invalid_gp_bp_relation", "src": {"GP"}, "tgt": {"BP"},
+                 "src_root_mf": False, "tgt_nonroot": False,
+                 "valid": upstream})
+            rules.append(
+                # #5  root-MF -> non-root BP : part_of OR the acts_upstream
+                # (RO:0002264) family OR the causally_upstream (RO:0002418)
+                # family. The RO:0002418 family is included because the canonical
+                # MOD "BP-only annotation" (unknown/root MF causally_upstream of a
+                # BP) uses it and must stay a standard, splittable annotation.
+                {"key": "invalid_mf_bp_relation", "src": {"MF"}, "tgt": {"BP"},
+                 "src_root_mf": True, "tgt_nonroot": True,
+                 "valid": {str(self.rel_part_of)} | upstream | set(self.causal_relations)})
+        return rules
+
+    def _matches_relation_rule(self, edge, rule, graph):
+        if self._category(edge.source_type, graph) not in rule["src"]:
+            return False
+        if self._category(edge.target_type, graph) not in rule["tgt"]:
+            return False
+        if rule["src_root_mf"] and not self._is_root_go_term(edge.source_type):
+            return False
+        if rule["tgt_nonroot"] and self._is_root_go_term(edge.target_type):
+            return False
+        return True
 
     def _gene_product_namespace_key(self, type_uri):
         """
@@ -925,13 +1087,17 @@ class GoCamGraphBuilder:
                 for edge_bnode_id in std_annot.edges.keys():
                     failed_checks["inconsistent_evidence"].add(edge_bnode_id)
 
-            # Check 2: Multiple part_of edges from molecular functions
-            part_of_edges = []
-            for edge in std_annot.edges.values():
-                if edge.property_uri == URIRef(relations.lookup_label("part of")) and self.uri_is_molecular_function(edge.source_type):
-                    part_of_edges.append(edge)
-            if len(part_of_edges) > 1:
-                failed_checks["multiple_mf_part_of"] = set([part_of_edge.bnode_id for part_of_edge in part_of_edges])
+            # Check #11: Cardinality MF->BP should be 1 (refines the former
+            # multiple_mf_part_of: narrows to MF->BP and admits the same relation
+            # set as #5 -- self.mf_bp_valid_relations, built once in __init__).
+            mf_bp_edges = [
+                edge for edge in std_annot.edges.values()
+                if self._go_aspect(edge.source_type, go_cam_graph.g) == "MF"
+                and self._go_aspect(edge.target_type, go_cam_graph.g) == "BP"
+                and str(edge.property_uri) in self.mf_bp_valid_relations
+            ]
+            if len(mf_bp_edges) > 1:
+                failed_checks["multiple_mf_bp"] = {e.bnode_id for e in mf_bp_edges}
 
             # Check 3: Causal relation edge between two molecular function nodes
             # If RO ontology was provided and causal relations were loaded
@@ -960,12 +1126,9 @@ class GoCamGraphBuilder:
             # `has_input`/`has_output` are allowed MF->GP extension relations.
             # Annotations with at least one valid backbone edge pass; those with
             # no valid backbone get every invalid candidate edge flagged.
-            enabled_by = URIRef(relations.lookup_label("enabled by"))
-            contributes_to = URIRef(relations.lookup_label("contributes to"))
-            mf_source_extensions = {
-                URIRef(relations.lookup_label("has input")),
-                URIRef(relations.lookup_label("has output")),
-            }
+            enabled_by = self.rel_enabled_by
+            contributes_to = self.rel_contributes_to
+            mf_source_extensions = {self.rel_has_input, self.rel_has_output}
             invalid_candidates = []
             has_valid_backbone = False
             for edge in std_annot.edges.values():
@@ -998,6 +1161,40 @@ class GoCamGraphBuilder:
                         invalid_candidates.append(edge.bnode_id)
             if not has_valid_backbone and invalid_candidates:
                 failed_checks.setdefault("invalid_gp_mf_relation", set()).update(invalid_candidates)
+
+            # Check #12: Cardinality MF->anatomical-structure should be 1.
+            mf_anatomy_edges = [
+                edge for edge in std_annot.edges.values()
+                if self._go_aspect(edge.source_type, go_cam_graph.g) == "MF"
+                and self._is_anatomical_structure(edge.target_type)
+            ]
+            if len(mf_anatomy_edges) > 1:
+                failed_checks["multiple_mf_anatomy"] = {e.bnode_id for e in mf_anatomy_edges}
+
+            # Check #13: Enabler must be a gene product (not GO, ChEBI, etc.).
+            # Complements #2, which skips non-GP endpoints. The enabler is the
+            # target of an enabled_by (MF->GP) edge.
+            for edge in std_annot.edges.values():
+                if edge.property_uri == self.rel_enabled_by:
+                    if self._gene_product_namespace_key(edge.target_type) not in self.GP_NAMESPACE_KEYS:
+                        failed_checks.setdefault("enabler_not_gp", set()).add(edge.bnode_id)
+
+            # Checks 3, 4, 5, 6, 10: relation-validity rule table. These validate
+            # the BACKBONE of an annotation only. An edge is subject to validation
+            # only if its relation is a recognized backbone/placement relation
+            # (self.backbone_relations); edges using any other relation are
+            # annotation extensions (e.g. BP -results_in_development_of-> anatomy)
+            # and are informational, not failures (consistent with #7/#8/#9).
+            # Endpoint categories are disjoint, so at most one rule matches an edge.
+            for edge in std_annot.edges.values():
+                prop = str(edge.property_uri)
+                if prop not in self.backbone_relations:
+                    continue  # extension-relation edge -> not validated
+                for rule in self.relation_rules:
+                    if self._matches_relation_rule(edge, rule, go_cam_graph.g):
+                        if prop not in rule["valid"]:
+                            failed_checks.setdefault(rule["key"], set()).add(edge.bnode_id)
+                        break
 
             std_annot.failed_checks = failed_checks
 

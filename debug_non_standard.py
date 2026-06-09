@@ -46,12 +46,12 @@ def find_nested_extensions(annot, builder):
     return lead, nested
 
 
-def classify_mf_part_of(annot):
-    """Sub-classify a multiple_mf_part_of failure.
+def classify_multiple_mf_bp(annot):
+    """Sub-classify a multiple_mf_bp failure.
 
     Returns "same_bp", "same_mf", or None (ambiguous).
     """
-    flagged_bnodes = annot.failed_checks.get("multiple_mf_part_of", set())
+    flagged_bnodes = annot.failed_checks.get("multiple_mf_bp", set())
     if not flagged_bnodes:
         return None
 
@@ -201,9 +201,9 @@ def main():
             classified = False
             eco_codes = "|".join(sorted(builder.term_label(e) for e in get_eco_types_for_annot(annot, gocam)))
 
-            # Bucket 2 & 3: multiple_mf_part_of sub-classification
-            if "multiple_mf_part_of" in annot.failed_checks:
-                shape = classify_mf_part_of(annot)
+            # Bucket 2 & 3: multiple_mf_bp sub-classification
+            if "multiple_mf_bp" in annot.failed_checks:
+                shape = classify_multiple_mf_bp(annot)
                 bucket_name = None
                 if shape == "same_bp":
                     multi_mf_same_bp.append(record)
@@ -214,7 +214,7 @@ def main():
                     bucket_name = "multi_bp_same_mf"
                     classified = True
                 if bucket_name:
-                    for bnode_id in annot.failed_checks["multiple_mf_part_of"]:
+                    for bnode_id in annot.failed_checks["multiple_mf_bp"]:
                         edge = annot.edges[bnode_id]
                         tsv_rows.append((gocam.model_id, gocam.title, bucket_name,
                                          builder.term_label(edge.source_type) if edge.source_type else "?",
