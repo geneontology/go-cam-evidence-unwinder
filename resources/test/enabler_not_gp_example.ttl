@@ -1,0 +1,37 @@
+<http://model.geneontology.org/enabler_not_gp_example> a <http://www.w3.org/2002/07/owl#Ontology> ;
+	<http://geneontology.org/lego/modelstate> "production" ;
+	<http://purl.org/dc/elements/1.1/title> "Enabler-not-GP (#13) test fixture" ;
+	<http://purl.org/pav/providedBy> "http://informatics.jax.org" .
+
+<http://geneontology.org/lego/evidence> a <http://www.w3.org/2002/07/owl#AnnotationProperty> .
+<http://purl.org/dc/elements/1.1/date> a <http://www.w3.org/2002/07/owl#AnnotationProperty> .
+
+# PASS: MF -enabled_by-> GP (MGI gene product)
+<http://model.geneontology.org/enabler_not_gp_example/mf1>
+	a <http://www.w3.org/2002/07/owl#NamedIndividual> , <http://purl.obolibrary.org/obo/GO_0042802> ;
+	<http://purl.obolibrary.org/obo/RO_0002333> <http://model.geneontology.org/enabler_not_gp_example/gp1> .
+<http://model.geneontology.org/enabler_not_gp_example/gp1>
+	a <http://www.w3.org/2002/07/owl#NamedIndividual> , <http://identifiers.org/mgi/MGI:1100089> .
+<http://model.geneontology.org/enabler_not_gp_example/ev1>
+	a <http://www.w3.org/2002/07/owl#NamedIndividual> , <http://purl.obolibrary.org/obo/ECO_0000314> ;
+	<http://purl.org/dc/elements/1.1/date> "2024-01-15" .
+[] a <http://www.w3.org/2002/07/owl#Axiom> ;
+	<http://www.w3.org/2002/07/owl#annotatedSource> <http://model.geneontology.org/enabler_not_gp_example/mf1> ;
+	<http://www.w3.org/2002/07/owl#annotatedProperty> <http://purl.obolibrary.org/obo/RO_0002333> ;
+	<http://www.w3.org/2002/07/owl#annotatedTarget> <http://model.geneontology.org/enabler_not_gp_example/gp1> ;
+	<http://geneontology.org/lego/evidence> <http://model.geneontology.org/enabler_not_gp_example/ev1> .
+
+# FAIL: MF -enabled_by-> ChEBI (chemical is not a gene product)
+<http://model.geneontology.org/enabler_not_gp_example/mf2>
+	a <http://www.w3.org/2002/07/owl#NamedIndividual> , <http://purl.obolibrary.org/obo/GO_0042802> ;
+	<http://purl.obolibrary.org/obo/RO_0002333> <http://model.geneontology.org/enabler_not_gp_example/chebi1> .
+<http://model.geneontology.org/enabler_not_gp_example/chebi1>
+	a <http://www.w3.org/2002/07/owl#NamedIndividual> , <http://purl.obolibrary.org/obo/CHEBI_15367> .
+<http://model.geneontology.org/enabler_not_gp_example/ev2>
+	a <http://www.w3.org/2002/07/owl#NamedIndividual> , <http://purl.obolibrary.org/obo/ECO_0000314> ;
+	<http://purl.org/dc/elements/1.1/date> "2024-01-15" .
+[] a <http://www.w3.org/2002/07/owl#Axiom> ;
+	<http://www.w3.org/2002/07/owl#annotatedSource> <http://model.geneontology.org/enabler_not_gp_example/mf2> ;
+	<http://www.w3.org/2002/07/owl#annotatedProperty> <http://purl.obolibrary.org/obo/RO_0002333> ;
+	<http://www.w3.org/2002/07/owl#annotatedTarget> <http://model.geneontology.org/enabler_not_gp_example/chebi1> ;
+	<http://geneontology.org/lego/evidence> <http://model.geneontology.org/enabler_not_gp_example/ev2> .

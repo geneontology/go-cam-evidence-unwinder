@@ -1,3 +1,9 @@
+# Use bash so recipes can run `set -o pipefail` (the system make is GNU 3.81, which
+# silently ignores .SHELLFLAGS). Recipes that pipe a command into `tee` prepend
+# `set -o pipefail` so a crash in `python3 ... | tee log` is not hidden by tee's
+# exit 0 (which made `make` report "Pipeline complete" on a failed run).
+SHELL := /bin/bash
+
 # Configuration
 DATE := $(shell date +%Y%m%d)
 TARGET_DIR := target_$(DATE)
@@ -7,6 +13,16 @@ GO_ONTOLOGY := target/go_current.json
 RO_ONTOLOGY := target/ro_current.owl
 GROUPS_YAML := target/groups.yaml
 LEGO_JOURNAL := target/blazegraph-lego.jnl
+
+# Optional list of .ttl filenames to skip (one per line), e.g. true GO-CAMs.
+# Produce via gocam-py's fetch_true_go_cams.sh, then extract success model IDs as <id>.ttl.
+# Usage: make pipeline SKIP_LIST=path/to/true_gocam_skip_list.txt
+SKIP_LIST ?=
+
+# Whether to pass --split-evidence to the unwinder. Defaults to enabled.
+# Usage: make pipeline SPLIT_EVIDENCE=     (disable)
+#        make pipeline SPLIT_EVIDENCE=1    (enable, default)
+SPLIT_EVIDENCE ?= 1
 
 # Output directories and files
 MODELS_SPLIT := $(TARGET_DIR)/models_split
@@ -21,6 +37,8 @@ GPAD_DIFF := $(TARGET_DIR)/gpad_diff.txt
 REPORT_FILE := $(TARGET_DIR)/noctua_models_graph_counts_$(DATE).tsv
 CRITERIA_FAIL_REPORT := $(TARGET_DIR)/models_split_criteria_failures_$(DATE).tsv
 DATE_CHANGE_REPORT := $(TARGET_DIR)/date_changes_$(DATE).tsv
+NON_STD_REPORT := $(TARGET_DIR)/remainders_report_$(DATE).tsv
+NON_STD_LOG := $(TARGET_DIR)/remainders_report_$(DATE).log
 
 # Default target
 .PHONY: all test clean pipeline
@@ -54,10 +72,14 @@ target/groups.yaml:
 pipeline: $(GPAD_DIFF)
 	@echo "Pipeline complete. Results in $(TARGET_DIR)/"
 
+# Just split evidence, don't run GPAD diff
+models_split: $(MODELS_SPLIT)
+	@echo "Pipeline complete. Results in $(TARGET_DIR)/"
+
 # Step 1: Run the unwinder to create split models
 $(MODELS_SPLIT): $(GO_ONTOLOGY) $(RO_ONTOLOGY) $(GROUPS_YAML)
 	mkdir -p $(MODELS_SPLIT)
-	python3 src/gocam_unwinder/gocam_ttl.py \
+	set -o pipefail; python3 src/gocam_unwinder/gocam_ttl.py \
 		-d $(MODELS_DIR) \
 		-o $(GO_ONTOLOGY) \
 		-r $(RO_ONTOLOGY) \
@@ -65,7 +87,8 @@ $(MODELS_SPLIT): $(GO_ONTOLOGY) $(RO_ONTOLOGY) $(GROUPS_YAML)
 		--skip-prefix SYNGO \
 		--skip-prefix R-HSA \
 		--skip-prefix YeastPathways \
-		--split-evidence \
+		$(if $(SKIP_LIST),--skip-file $(SKIP_LIST),) \
+		$(if $(SPLIT_EVIDENCE),--split-evidence,) \
 		--output-dir $(MODELS_SPLIT) \
 		--report-file $(REPORT_FILE) \
 		--criteria-fail-report $(CRITERIA_FAIL_REPORT) \
@@ -139,6 +162,22 @@ $(GPAD_PROD): $(GPAD_EXPORT_PROD)
 $(GPAD_DIFF): $(GPAD_PROD) $(GPAD_DEV)
 	diff $(GPAD_PROD) $(GPAD_DEV) > $@ || true
 	@echo "GPAD diff written to $@"
+
+$(NON_STD_REPORT): $(GO_ONTOLOGY) $(RO_ONTOLOGY) $(GROUPS_YAML)
+	mkdir -p $(TARGET_DIR)
+	set -o pipefail; python3 debug_non_standard.py \
+		$(MODELS_DIR) \
+		-o $(GO_ONTOLOGY) \
+		-r $(RO_ONTOLOGY) \
+		--skip-prefix SYNGO \
+		--skip-prefix R-HSA \
+		--skip-prefix YeastPathways \
+		$(if $(SKIP_LIST),--skip-file $(SKIP_LIST),) \
+		--groups-yaml $(GROUPS_YAML) \
+		--tsv-output $@ | tee $(NON_STD_LOG)
+
+.PHONY: non_std
+non_std: $(NON_STD_REPORT)
 
 # Clean up generated files
 clean:

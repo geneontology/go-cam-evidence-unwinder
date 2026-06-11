@@ -1,12 +1,12 @@
 import io
+import os
 import pytest
 import rdflib
 from gocam_unwinder.gocam_ttl import GoCamGraph, GoCamGraphBuilder
 
 ontology_file = "target/go_20250601.json"  # TODO: Make this GitHub-friendly, maybe LFS
 
-def test_gocam_ttl():
-    builder = GoCamGraphBuilder(ontology_file)
+def test_gocam_ttl(builder):
 
     # Positive test case: MGI_MGI_1100089 has consistent evidence across edges
     gocam_graph = builder.parse_ttl("resources/test/MGI_MGI_1100089.ttl")  # Tnfsf11
@@ -45,7 +45,7 @@ def test_gocam_ttl():
     assert len(gocam_graph.standard_annotations) >= 0
 
 
-def test_multi_edge_evidence_grouping():
+def test_multi_edge_evidence_grouping(builder):
     """
     Test that evidence with identical metadata across multiple edges
     is properly grouped when splitting.
@@ -55,7 +55,6 @@ def test_multi_edge_evidence_grouping():
     together so that newly created multi-edge subgraphs retain the correct
     group of evidence individuals.
     """
-    builder = GoCamGraphBuilder(ontology_file)
     gocam_graph = builder.parse_ttl("resources/test/MGI_MGI_1100089.ttl")
 
     # Find the standard annotation with the multi-edge multi-evidence issue
@@ -182,13 +181,11 @@ def test_mf_causal_mf_filtering():
         "Should have at least as many non-standard annotations when MF-causal->MF filtering is applied"
 
 
-def test_print_non_standard_annotation_failed_checks():
+def test_print_non_standard_annotation_failed_checks(builder):
     """
     Test that print_non_standard_annotation_failed_checks outputs correct TSV format
     with model ID, title, failure reason, and term labels for source, predicate, object.
     """
-    ro_ontology_file = "resources/test/ro_20250723.owl"
-    builder = GoCamGraphBuilder(ontology_file, ro_ontology_file)
     gocam_graph = builder.parse_ttl("resources/test/5b318d0900000481.ttl")
 
     # Verify we have non-standard annotations to report
@@ -219,8 +216,13 @@ def test_print_non_standard_annotation_failed_checks():
         assert title, "Title should not be empty"
 
         # Failure reason should be one of the known check names
-        assert failure_reason in ["inconsistent_evidence", "multiple_mf_part_of", "mf_causal_mf", "edge_without_evidence"], \
-            f"Unknown failure reason: {failure_reason}"
+        assert failure_reason in [
+            "inconsistent_evidence", "multiple_mf_bp", "mf_causal_mf",
+            "edge_without_evidence", "invalid_gp_mf_relation",
+            "invalid_gp_cc_relation", "invalid_gp_bp_relation",
+            "invalid_mf_bp_relation", "invalid_mf_cc_relation",
+            "invalid_bp_cc_relation", "multiple_mf_anatomy", "enabler_not_gp",
+        ], f"Unknown failure reason: {failure_reason}"
 
         # Labels should be non-empty (either term labels or CURIEs)
         assert source_label, "Source label should not be empty"
@@ -247,13 +249,12 @@ def test_print_non_standard_annotation_failed_checks():
     assert len(lines) == len(set(lines)), "Output should not contain duplicate rows"
 
 
-def test_print_non_standard_annotation_failed_checks_multiple_reasons():
+def test_print_non_standard_annotation_failed_checks_multiple_reasons(builder):
     """
     Test that print_non_standard_annotation_failed_checks correctly reports
     annotations that fail multiple checks.
     """
     # Use a model that has annotations failing the inconsistent_evidence check
-    builder = GoCamGraphBuilder(ontology_file)
     gocam_graph = builder.parse_ttl("resources/test/61452e3d00000323.ttl")
 
     # Verify we have non-standard annotations
@@ -279,7 +280,7 @@ def test_print_non_standard_annotation_failed_checks_multiple_reasons():
     assert len(inconsistent_lines) > 0, "Should have inconsistent_evidence failures"
 
 
-def test_edges_without_evidence():
+def test_edges_without_evidence(builder):
     """
     Test that edges without evidence are included in annotation subgraph assembly.
 
@@ -292,8 +293,6 @@ def test_edges_without_evidence():
     The no-evidence edge connects individual ...17 (GO:0030545, receptor ligand
     activity) to ...25 (GO:0004971, AMPA glutamate receptor activity).
     """
-    ro_ontology_file = "resources/test/ro_20250723.owl"
-    builder = GoCamGraphBuilder(ontology_file, ro_ontology_file)
     gocam_graph = builder.parse_ttl("resources/test/66c7d41500000016.ttl")
 
     # The two MF individuals that are bridged by the no-evidence causal edge
@@ -333,13 +332,11 @@ def test_edges_without_evidence():
     assert no_evidence_edge_found, "The no-evidence causal edge should be in the annotation"
 
 
-def test_edges_without_evidence_report_column():
+def test_edges_without_evidence_report_column(builder):
     """
     Test that the report includes a column counting edges without evidence.
     Issue #14: Report out models having edges without evidence.
     """
-    ro_ontology_file = "resources/test/ro_20250723.owl"
-    builder = GoCamGraphBuilder(ontology_file, ro_ontology_file)
     gocam_graph = builder.parse_ttl("resources/test/66c7d41500000016.ttl")
 
     # Count edges without evidence across all annotations
@@ -354,8 +351,7 @@ def test_edges_without_evidence_report_column():
     assert no_evidence_count == 1, f"Expected 1 edge without evidence, got {no_evidence_count}"
 
     # Also verify a model with all edges having evidence reports 0
-    builder_no_ro = GoCamGraphBuilder(ontology_file)
-    gocam_graph_all_ev = builder_no_ro.parse_ttl("resources/test/MGI_MGI_1100089.ttl")
+    gocam_graph_all_ev = builder.parse_ttl("resources/test/MGI_MGI_1100089.ttl")
 
     no_evidence_count_all = 0
     all_annotations_all = gocam_graph_all_ev.standard_annotations + gocam_graph_all_ev.non_standard_annotations
@@ -367,7 +363,7 @@ def test_edges_without_evidence_report_column():
     assert no_evidence_count_all == 0, f"MGI_MGI_1100089 should have 0 edges without evidence, got {no_evidence_count_all}"
 
 
-def test_no_evidence_edge_gocam_relations_filter():
+def test_no_evidence_edge_gocam_relations_filter(builder):
     """
     Regression test: model 57c82fad00000252 should be parsed as 1 non-standard annotation.
 
@@ -376,8 +372,6 @@ def test_no_evidence_edge_gocam_relations_filter():
     extracted and fed into the union-find, causing the model to be incorrectly
     split into 4 subgraphs (3 standard + 1 non-standard).
     """
-    ro_ontology_file = "resources/test/ro_20250723.owl"
-    builder = GoCamGraphBuilder(ontology_file, ro_ontology_file)
     gocam_graph = builder.parse_ttl("resources/test/57c82fad00000252.ttl")
 
     std_count = len(gocam_graph.standard_annotations)
@@ -389,7 +383,7 @@ def test_no_evidence_edge_gocam_relations_filter():
         f"Expected 1 non-standard annotation, got {non_std_count}"
 
 
-def test_edge_without_evidence_filter():
+def test_edge_without_evidence_filter(builder):
     """
     Test that annotations containing edges without evidence are marked non-standard
     with the 'edge_without_evidence' failed check.
@@ -398,8 +392,6 @@ def test_edge_without_evidence_filter():
     The annotation containing this edge should have 'edge_without_evidence' in
     its failed_checks, with the no-evidence edge's bnode ID recorded.
     """
-    ro_ontology_file = "resources/test/ro_20250723.owl"
-    builder = GoCamGraphBuilder(ontology_file, ro_ontology_file)
     gocam_graph = builder.parse_ttl("resources/test/66c7d41500000016.ttl")
 
     # The two MF individuals bridged by the no-evidence causal edge
@@ -429,14 +421,13 @@ def test_edge_without_evidence_filter():
             assert len(edge.evidence_uris) == 0, "Flagged edge should have no evidence"
 
     # Also verify that a model with all edges having evidence does NOT get this check
-    builder_no_ro = GoCamGraphBuilder(ontology_file)
-    gocam_graph_all_ev = builder_no_ro.parse_ttl("resources/test/MGI_MGI_1100089.ttl")
+    gocam_graph_all_ev = builder.parse_ttl("resources/test/MGI_MGI_1100089.ttl")
     for annot in gocam_graph_all_ev.standard_annotations:
         assert "edge_without_evidence" not in (annot.failed_checks or {}), \
             "Annotations with all edges having evidence should not fail this check"
 
 
-def test_edge_without_evidence_all_edges_no_evidence():
+def test_edge_without_evidence_all_edges_no_evidence(builder):
     """
     Test that an annotation where ALL edges lack evidence is marked non-standard
     with the 'edge_without_evidence' failed check.
@@ -446,8 +437,6 @@ def test_edge_without_evidence_all_edges_no_evidence():
     where all edges have no evidence. This tests the case where an entire annotation
     has zero evidence, not just a single bridging edge.
     """
-    ro_ontology_file = "resources/test/ro_20250723.owl"
-    builder = GoCamGraphBuilder(ontology_file, ro_ontology_file)
     gocam_graph = builder.parse_ttl("resources/test/67369e7600005491.ttl")
 
     # Find the individual typed as GO:0006954 (inflammatory response)
@@ -486,7 +475,7 @@ def test_edge_without_evidence_all_edges_no_evidence():
     assert len(actual_no_ev_edges) == 3, "Should have 3 edges without evidence"
 
 
-def test_date_tolerant_evidence_grouping():
+def test_date_tolerant_evidence_grouping(builder):
     """
     Test that evidence differing only in dc:date is grouped together.
 
@@ -496,7 +485,6 @@ def test_date_tolerant_evidence_grouping():
     same PMID, same contributor). These should be grouped together, and the
     date should be updated to the most recent (2023-02-13).
     """
-    builder = GoCamGraphBuilder(ontology_file)
     gocam_graph = builder.parse_ttl("resources/test/MGI_MGI_1101770.ttl")
 
     # Individual a9c5f5d3 is the Ring1 MF activity with date-differing evidence
@@ -520,14 +508,13 @@ def test_date_tolerant_evidence_grouping():
             f"Group {group_index} should have evidence from both edges"
 
 
-def test_date_update_on_split():
+def test_date_update_on_split(builder):
     """
     Test that after splitting, evidence nodes are updated to the most recent dc:date.
 
     Issue #15: When evidence is grouped across edges that have different dates,
     the split output should use the most recent date for all evidence in the group.
     """
-    builder = GoCamGraphBuilder(ontology_file)
     gocam_graph = builder.parse_ttl("resources/test/MGI_MGI_1101770.ttl")
 
     # Split and write
@@ -563,14 +550,13 @@ def test_date_update_on_split():
             f"Evidence {ev_uri} should have date 2023-02-13, got {str(dates[0])}"
 
 
-def test_date_change_report():
+def test_date_change_report(builder):
     """
     Test that splitting produces date change records with edge info.
 
     Issue #15: Records should include model ID, title, old date, new date,
     and source/predicate/target type URIs for each updated edge.
     """
-    builder = GoCamGraphBuilder(ontology_file)
     gocam_graph = builder.parse_ttl("resources/test/MGI_MGI_1101770.ttl")
 
     # Split and collect date change records
@@ -595,7 +581,7 @@ def test_date_change_report():
         assert target_label, "Target label should not be empty"
 
 
-def test_get_extension_edges():
+def test_get_extension_edges(builder):
     """
     Test that get_extension_edges() returns the non-backbone edges of a
     StandardAnnotation. Uses the GO:0120045 (stereocilium maintenance)
@@ -603,7 +589,6 @@ def test_get_extension_edges():
     - 2 backbone edges (MF-enabled_by->GP, MF-part_of->BP)
     - 3 extension edges (BP-part_of->BP, BP-occurs_in->CL, CL-part_of->EMAPA)
     """
-    builder = GoCamGraphBuilder(ontology_file)
     gocam_graph = builder.parse_ttl("resources/test/5966411600000001.ttl")
 
     # Locate the annotation containing the GO:0120045 individual.
@@ -672,3 +657,483 @@ def test_get_extension_edges():
     }
     assert backbone_tuples_seen == expected_backbone, \
         f"Backbone edges differ.\n  expected: {expected_backbone}\n  got:      {backbone_tuples_seen}"
+
+
+def test_get_primary_go_terms(builder):
+    """
+    Test that get_primary_go_terms() returns the primary GO term URIs of an
+    annotation, grouped by aspect ("MF", "BP", "CC"). Uses the GO:0120045
+    (stereocilium maintenance) annotation in 5966411600000001.ttl, which has:
+      - MF backbone (MF-enabled_by-GP)   -> primary MF = GO:0003674
+      - BP backbone (MF-part_of-BP)      -> primary BP = GO:0120045
+      - No CC backbone                   -> "CC" key absent
+    """
+    gocam_graph = builder.parse_ttl("resources/test/5966411600000001.ttl")
+
+    # Locate the annotation containing the GO:0120045 individual.
+    bp_individual = rdflib.term.URIRef(
+        'http://model.geneontology.org/5966411600000001/5966411600000004')
+    target_annot = None
+    for annot in gocam_graph.standard_annotations + gocam_graph.non_standard_annotations:
+        if bp_individual in annot.individuals:
+            target_annot = annot
+            break
+    assert target_annot is not None, \
+        "Annotation containing the GO:0120045 individual should exist"
+
+    primaries = builder.get_primary_go_terms(target_annot)
+
+    # Expect exactly the two aspects present
+    assert set(primaries.keys()) == {"MF", "BP"}, \
+        f"Expected aspects {{'MF', 'BP'}}, got {set(primaries.keys())}"
+
+    # Each aspect's list should have exactly 1 URI for this annotation
+    assert len(primaries["MF"]) == 1, \
+        f"Expected 1 primary MF URI, got {len(primaries['MF'])}: {primaries['MF']}"
+    assert len(primaries["BP"]) == 1, \
+        f"Expected 1 primary BP URI, got {len(primaries['BP'])}: {primaries['BP']}"
+
+    # Verify the actual URIs
+    assert str(primaries["MF"][0]) == "http://purl.obolibrary.org/obo/GO_0003674", \
+        f"Primary MF should be GO:0003674, got {primaries['MF'][0]}"
+    assert str(primaries["BP"][0]) == "http://purl.obolibrary.org/obo/GO_0120045", \
+        f"Primary BP should be GO:0120045, got {primaries['BP'][0]}"
+
+    # CC key should be absent (no CC backbone in this annotation)
+    assert "CC" not in primaries, \
+        f"Expected no 'CC' key, got primaries={primaries}"
+
+
+# ---------------------------------------------------------------------------
+# _resolve_mf_type() helper tests (Task 2)
+# ---------------------------------------------------------------------------
+
+def test_resolve_mf_type_direct_uri(builder):
+    mf_uri = rdflib.URIRef("http://purl.obolibrary.org/obo/GO_0042802")  # identical protein binding (MF)
+    g = rdflib.Graph()
+    assert builder._resolve_mf_type(mf_uri, g) == mf_uri
+
+
+def test_resolve_mf_type_non_mf_uri_returns_none(builder):
+    bp_uri = rdflib.URIRef("http://purl.obolibrary.org/obo/GO_0006954")  # inflammatory response (BP)
+    g = rdflib.Graph()
+    assert builder._resolve_mf_type(bp_uri, g) is None
+
+
+def test_resolve_mf_type_complement_of_mf(builder):
+    g = rdflib.Graph()
+    g.parse(data='''
+        @prefix owl: <http://www.w3.org/2002/07/owl#> .
+        @prefix rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
+        _:mf_indiv rdf:type [ rdf:type owl:Class ;
+                              owl:complementOf <http://purl.obolibrary.org/obo/GO_0042802> ] .
+    ''', format="ttl")
+    # Find the bnode that's the value of rdf:type
+    bnode = None
+    for _, _, o in g.triples((None, rdflib.RDF.type, None)):
+        if isinstance(o, rdflib.BNode):
+            bnode = o
+            break
+    assert bnode is not None, "Test setup: expected a bnode class expression"
+    resolved = builder._resolve_mf_type(bnode, g)
+    assert resolved == rdflib.URIRef("http://purl.obolibrary.org/obo/GO_0042802")
+
+
+# ---------------------------------------------------------------------------
+# invalid_gp_mf_relation check tests (Task 3)
+# ---------------------------------------------------------------------------
+
+def test_gp_mf_relation_allows_enables(builder):
+    gocam = builder.parse_ttl("resources/test/MGI_MGI_1100089.ttl")
+    for annot in gocam.standard_annotations + gocam.non_standard_annotations:
+        assert "invalid_gp_mf_relation" not in annot.failed_checks, (
+            f"enabled_by-based annotation incorrectly flagged: {annot.failed_checks}"
+        )
+
+
+def test_gp_mf_relation_allows_contributes_to(builder):
+    gocam = builder.parse_ttl("resources/test/contributes_to_example.ttl")
+    flagged = [
+        a for a in gocam.non_standard_annotations
+        if "invalid_gp_mf_relation" in a.failed_checks
+    ]
+    assert flagged == [], f"contributes_to incorrectly flagged: {flagged}"
+    # Should remain standard
+    assert len(gocam.standard_annotations) == 1
+
+
+def test_gp_mf_relation_rejects_other_predicate(builder):
+    gocam = builder.parse_ttl("resources/test/invalid_gp_mf_relation_example.ttl")
+    flagged_edges = set()
+    for a in gocam.non_standard_annotations:
+        flagged_edges |= a.failed_checks.get("invalid_gp_mf_relation", set())
+    assert len(flagged_edges) >= 1, (
+        "Annotation using a non-allowed GP-MF predicate should be flagged"
+    )
+    # And should land in non_standard_annotations
+    assert len(gocam.non_standard_annotations) == 1
+    assert len(gocam.standard_annotations) == 0
+
+
+# ---------------------------------------------------------------------------
+# TSV reporter integration (Task 4)
+# ---------------------------------------------------------------------------
+
+def test_print_non_standard_annotation_failed_checks_includes_gp_mf_relation(builder):
+    gocam = builder.parse_ttl("resources/test/invalid_gp_mf_relation_example.ttl")
+    buf = io.StringIO()
+    builder.print_non_standard_annotation_failed_checks(gocam, buf)
+    contents = buf.getvalue()
+    assert "invalid_gp_mf_relation" in contents
+
+
+# ---------------------------------------------------------------------------
+# Model file collection: --skip-file / --skip-prefix / id-filter
+# ---------------------------------------------------------------------------
+
+def test_collect_model_files_skip_filenames(tmp_path):
+    from gocam_unwinder.gocam_ttl import collect_model_files
+    for name in ["a.ttl", "b.ttl", "c.ttl", "notes.txt"]:
+        (tmp_path / name).write_text("")
+    result = collect_model_files(str(tmp_path), skip_filenames={"b.ttl"})
+    names = sorted(os.path.basename(p) for p in result)
+    assert names == ["a.ttl", "c.ttl"]
+
+
+def test_collect_model_files_combines_filters(tmp_path):
+    from gocam_unwinder.gocam_ttl import collect_model_files
+    for name in ["SYNGO_1.ttl", "keep.ttl", "skipme.ttl", "drop.ttl"]:
+        (tmp_path / name).write_text("")
+    result = collect_model_files(
+        str(tmp_path),
+        skip_prefixes=["SYNGO"],
+        skip_filenames={"skipme.ttl"},
+        model_id_filter={"keep"},
+    )
+    names = sorted(os.path.basename(p) for p in result)
+    # SYNGO_1 skipped by prefix, skipme by filename, drop excluded by id filter
+    assert names == ["keep.ttl"]
+
+
+# ---------------------------------------------------------------------------
+# GP namespace resolver (allowlist) — Issue #22
+# ---------------------------------------------------------------------------
+
+def test_gene_product_namespace_key(builder):
+    U = rdflib.URIRef
+
+    # Gene products -> namespace keys in GP_NAMESPACE_KEYS
+    gp_cases = {
+        "http://identifiers.org/mgi/MGI:1100089": "mgi",
+        "http://identifiers.org/sgd/S000005274": "sgd",
+        "http://identifiers.org/zfin/ZDB-GENE-060118-1": "zfin",
+        "http://identifiers.org/uniprot/P12345": "uniprot",
+        "http://identifiers.org/wormbase/WB:WBGene00000912": "wormbase",
+        "http://identifiers.org/rgd/RGD:61909": "rgd",
+        "http://identifiers.org/dictybase.gene/DDB_G0277853": "dictybase",
+        "http://identifiers.org/tair.locus/2200950": "tair",
+        "https://www.ebi.ac.uk/complexportal/complex/CPX-566": "complexportal",
+        "http://purl.obolibrary.org/obo/PR_000000001": "pr",
+        # Compact identifiers.org form ({seg}:{id} instead of {seg}/{id}).
+        # PomBase uses this real-world form, with a '.' inside the id portion.
+        "http://identifiers.org/PomBase:SPBC16D10.09": "pombase",
+        "https://identifiers.org/complexportal:CPX-566": "complexportal",
+        "https://identifiers.org/uniprot:P12345": "uniprot",
+    }
+    for uri, expected_key in gp_cases.items():
+        key = builder._gene_product_namespace_key(U(uri))
+        assert key == expected_key, f"{uri}: got {key!r}, expected {expected_key!r}"
+        assert key in builder.GP_NAMESPACE_KEYS, f"{uri}: key {key!r} not in GP_NAMESPACE_KEYS"
+
+    # Non-gene-products -> key absent from GP_NAMESPACE_KEYS (or None)
+    non_gp = [
+        "http://purl.obolibrary.org/obo/EMAPA_16894",
+        "http://purl.obolibrary.org/obo/WBbt_0006796",
+        "http://purl.obolibrary.org/obo/CL_0000066",
+        "http://purl.obolibrary.org/obo/UBERON_0000955",
+        "http://purl.obolibrary.org/obo/GO_0003674",
+        "http://purl.obolibrary.org/obo/RO_0002418",
+        "http://purl.obolibrary.org/obo/BFO_0000050",
+        "http://purl.obolibrary.org/obo/CHEBI_15367",
+    ]
+    for uri in non_gp:
+        assert builder._gene_product_namespace_key(U(uri)) not in builder.GP_NAMESPACE_KEYS, \
+            f"{uri} should not resolve to a GP namespace"
+
+    # HGNC is intentionally excluded from the allowlist
+    assert builder._gene_product_namespace_key(
+        U("http://identifiers.org/hgnc/HGNC:11998")) == "hgnc"
+    assert "hgnc" not in builder.GP_NAMESPACE_KEYS
+
+    # Non-URIRef (e.g. a blank node) -> None
+    assert builder._gene_product_namespace_key(rdflib.BNode()) is None
+
+
+def test_gp_mf_relation_ignores_anatomy_target(builder):
+    # MF -occurs_in-> WBbt anatomy is an extension, not a GP-MF backbone edge.
+    # Under the old {GO,RO,BFO} blocklist this was falsely flagged.
+    gocam = builder.parse_ttl("resources/test/mf_occurs_in_anatomy_example.ttl")
+    for annot in gocam.standard_annotations + gocam.non_standard_annotations:
+        assert "invalid_gp_mf_relation" not in annot.failed_checks, (
+            f"MF->anatomy edge incorrectly flagged: {annot.failed_checks}"
+        )
+
+
+def test_gp_mf_relation_allows_mf_to_gp_has_input_output(builder):
+    # has_input / has_output are valid MF->GP extension relations.
+    gocam = builder.parse_ttl("resources/test/mf_to_gp_has_input_output_example.ttl")
+    for annot in gocam.standard_annotations + gocam.non_standard_annotations:
+        assert "invalid_gp_mf_relation" not in annot.failed_checks, (
+            f"MF->GP has_input/has_output incorrectly flagged: {annot.failed_checks}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# Tasks 1–5: shared infrastructure (constants, cached relation URIs, helpers)
+# ---------------------------------------------------------------------------
+
+def test_relation_infrastructure(builder):
+    # acts_upstream family loaded from RO (RO:0002264 + children)
+    au = builder.acts_upstream_relations
+    assert "http://purl.obolibrary.org/obo/RO_0002264" in au          # root of the family
+    assert "http://purl.obolibrary.org/obo/RO_0002331" in au          # involved in (child)
+    assert "http://purl.obolibrary.org/obo/RO_0002418" not in au      # separate branch
+    # root GO terms
+    assert "http://purl.obolibrary.org/obo/GO_0003674" in builder.ROOT_GO_TERMS
+    assert "http://purl.obolibrary.org/obo/GO_0008150" in builder.ROOT_GO_TERMS
+    assert "http://purl.obolibrary.org/obo/GO_0005575" in builder.ROOT_GO_TERMS
+    # anatomy namespace keys
+    assert "cl" in builder.ANATOMY_NAMESPACE_KEYS
+    assert "uberon" in builder.ANATOMY_NAMESPACE_KEYS
+    # cached relation URIs (all 8)
+    assert str(builder.rel_enabled_by) == "http://purl.obolibrary.org/obo/RO_0002333"
+    assert str(builder.rel_contributes_to) == "http://purl.obolibrary.org/obo/RO_0002326"
+    assert str(builder.rel_has_input) == "http://purl.obolibrary.org/obo/RO_0002233"
+    assert str(builder.rel_has_output) == "http://purl.obolibrary.org/obo/RO_0002234"
+    assert str(builder.rel_part_of) == "http://purl.obolibrary.org/obo/BFO_0000050"
+    assert str(builder.rel_located_in) == "http://purl.obolibrary.org/obo/RO_0001025"
+    assert str(builder.rel_is_active_in) == "http://purl.obolibrary.org/obo/RO_0002432"
+    assert str(builder.rel_occurs_in) == "http://purl.obolibrary.org/obo/BFO_0000066"
+
+
+def test_go_aspect(builder):
+    U = rdflib.URIRef
+    g = rdflib.Graph()  # empty graph: owl:complementOf lookup finds nothing,
+                        # so BNode inputs always resolve to None here
+    assert builder._go_aspect(U("http://purl.obolibrary.org/obo/GO_0042802"), g) == "MF"
+    assert builder._go_aspect(U("http://purl.obolibrary.org/obo/GO_0003674"), g) == "MF"  # root MF
+    assert builder._go_aspect(U("http://purl.obolibrary.org/obo/GO_0006954"), g) == "BP"
+    assert builder._go_aspect(U("http://purl.obolibrary.org/obo/GO_0005634"), g) == "CC"
+    # Non-GO entities are not an aspect
+    assert builder._go_aspect(U("http://identifiers.org/mgi/MGI:1100089"), g) is None
+    assert builder._go_aspect(U("http://purl.obolibrary.org/obo/CL_0000066"), g) is None
+    assert builder._go_aspect(None, g) is None
+    assert builder._go_aspect(rdflib.BNode(), g) is None  # unwrapped BNode -> None
+
+
+def test_is_root_go_term(builder):
+    U = rdflib.URIRef
+    assert builder._is_root_go_term(U("http://purl.obolibrary.org/obo/GO_0003674")) is True
+    assert builder._is_root_go_term(U("http://purl.obolibrary.org/obo/GO_0008150")) is True
+    assert builder._is_root_go_term(U("http://purl.obolibrary.org/obo/GO_0005575")) is True
+    assert builder._is_root_go_term(U("http://purl.obolibrary.org/obo/GO_0042802")) is False
+    assert builder._is_root_go_term(rdflib.BNode()) is False
+    assert builder._is_root_go_term(None) is False
+
+
+def test_is_anatomical_structure(builder):
+    U = rdflib.URIRef
+    # GO cellular components count as anatomical structures
+    assert builder._is_anatomical_structure(U("http://purl.obolibrary.org/obo/GO_0005634")) is True
+    # Anatomy-ontology terms count
+    assert builder._is_anatomical_structure(U("http://purl.obolibrary.org/obo/CL_0000066")) is True
+    assert builder._is_anatomical_structure(U("http://purl.obolibrary.org/obo/UBERON_0000955")) is True
+    assert builder._is_anatomical_structure(U("http://purl.obolibrary.org/obo/EMAPA_16894")) is True
+    # Non-anatomy: gene product, chemical, MF, BP
+    assert builder._is_anatomical_structure(U("http://identifiers.org/mgi/MGI:1100089")) is False
+    assert builder._is_anatomical_structure(U("http://purl.obolibrary.org/obo/CHEBI_15367")) is False
+    assert builder._is_anatomical_structure(U("http://purl.obolibrary.org/obo/GO_0042802")) is False
+    assert builder._is_anatomical_structure(U("http://purl.obolibrary.org/obo/GO_0006954")) is False
+
+
+def test_category(builder):
+    U = rdflib.URIRef
+    g = rdflib.Graph()
+    assert builder._category(U("http://purl.obolibrary.org/obo/GO_0042802"), g) == "MF"
+    assert builder._category(U("http://purl.obolibrary.org/obo/GO_0006954"), g) == "BP"
+    assert builder._category(U("http://purl.obolibrary.org/obo/GO_0005634"), g) == "CC"
+    assert builder._category(U("http://identifiers.org/mgi/MGI:1100089"), g) == "GP"
+    assert builder._category(U("http://purl.obolibrary.org/obo/PR_000000001"), g) == "GP"
+    assert builder._category(U("http://purl.obolibrary.org/obo/CL_0000066"), g) == "ANATOMY"
+    assert builder._category(U("http://purl.obolibrary.org/obo/CHEBI_15367"), g) is None
+    assert builder._category(None, g) is None
+
+
+# ---------------------------------------------------------------------------
+# Shared helper for Tasks 6–10 tests
+# ---------------------------------------------------------------------------
+
+def _flagged_props(gocam, key):
+    """Return the set of property-URI strings flagged under `key` across all annotations."""
+    props = set()
+    for annot in gocam.standard_annotations + gocam.non_standard_annotations:
+        for bnode_id in annot.failed_checks.get(key, set()):
+            props.add(str(annot.edges[bnode_id].property_uri))
+    return props
+
+
+# ---------------------------------------------------------------------------
+# Task 6: Rule #10 — BP->CC/anatomy must be occurs_in
+# ---------------------------------------------------------------------------
+
+def test_invalid_bp_cc_relation(builder):
+    gocam = builder.parse_ttl("resources/test/bp_cc_relation_example.ttl")
+    # Only the located_in BP->CL edge is flagged; the occurs_in edge is not.
+    assert _flagged_props(gocam, "invalid_bp_cc_relation") == {
+        "http://purl.obolibrary.org/obo/RO_0001025"
+    }
+
+
+# ---------------------------------------------------------------------------
+# Task 7: Rule #3 — GP->non-root CC must be located_in
+# ---------------------------------------------------------------------------
+
+def test_invalid_gp_cc_relation(builder):
+    gocam = builder.parse_ttl("resources/test/gp_cc_relation_example.ttl")
+    # Only the part_of GP->CC edge is flagged; the located_in edge is not.
+    assert _flagged_props(gocam, "invalid_gp_cc_relation") == {
+        "http://purl.obolibrary.org/obo/BFO_0000050"
+    }
+
+
+# ---------------------------------------------------------------------------
+# Task 8: Rule #4 — GP->BP must be acts_upstream_of_or_within or child
+# ---------------------------------------------------------------------------
+
+def test_invalid_gp_bp_relation(builder):
+    gocam = builder.parse_ttl("resources/test/gp_bp_relation_example.ttl")
+    # part_of GP->BP is flagged; acts_upstream_of_or_within is not.
+    assert _flagged_props(gocam, "invalid_gp_bp_relation") == {
+        "http://purl.obolibrary.org/obo/BFO_0000050"
+    }
+
+
+def test_invalid_gp_bp_relation_skipped_without_ro():
+    # #4 is RO-dependent; without an RO ontology it is omitted from the table,
+    # so a wrong GP->BP relation is NOT flagged.
+    builder_no_ro = GoCamGraphBuilder(ontology_file)
+    gocam = builder_no_ro.parse_ttl("resources/test/gp_bp_relation_example.ttl")
+    for annot in gocam.standard_annotations + gocam.non_standard_annotations:
+        assert "invalid_gp_bp_relation" not in annot.failed_checks
+
+
+# ---------------------------------------------------------------------------
+# Task 9: Rule #5 — root-MF->non-root BP must be part_of or acts_upstream family
+# ---------------------------------------------------------------------------
+
+def test_invalid_mf_bp_relation(builder):
+    # PASS: root-MF -part_of-> BP in 5966411600000001 is accepted (part_of OK for MF->BP).
+    ok = builder.parse_ttl("resources/test/5966411600000001.ttl")
+    for annot in ok.standard_annotations + ok.non_standard_annotations:
+        assert "invalid_mf_bp_relation" not in annot.failed_checks, \
+            "root-MF -part_of-> BP should be accepted"
+
+    # PASS: root-MF -RO:0002418(causally_upstream)-> BP in MGI_MGI_1100089 is the
+    # canonical MOD BP-only annotation pattern and is accepted (2026-06-09 decision).
+    mgi = builder.parse_ttl("resources/test/MGI_MGI_1100089.ttl")
+    assert "http://purl.obolibrary.org/obo/RO_0002418" not in \
+        _flagged_props(mgi, "invalid_mf_bp_relation"), \
+        "root-MF -causally_upstream_of_or_within-> BP should be accepted"
+
+    # Dedicated fixture: RO:0002418 edge passes; a located_in edge (wrong relation
+    # for MF->BP) is the only one flagged.
+    fix = builder.parse_ttl("resources/test/mf_bp_relation_example.ttl")
+    assert _flagged_props(fix, "invalid_mf_bp_relation") == {
+        "http://purl.obolibrary.org/obo/RO_0001025"
+    }
+
+
+# ---------------------------------------------------------------------------
+# Task 10: Rule #6 — root-MF->non-root CC must be is_active_in
+# ---------------------------------------------------------------------------
+
+def test_invalid_mf_cc_relation(builder):
+    gocam = builder.parse_ttl("resources/test/mf_cc_relation_example.ttl")
+    # located_in root-MF->CC is flagged; is_active_in is not.
+    assert _flagged_props(gocam, "invalid_mf_cc_relation") == {
+        "http://purl.obolibrary.org/obo/RO_0001025"
+    }
+
+
+def test_relation_rules_ignore_extension_edges(builder):
+    """Regression: the relation-validity rules (#3/#4/#5/#6/#10) validate the
+    BACKBONE only. Edges using non-placement (extension) relations must NOT be
+    flagged. MGI_MGI_1100089 contains BP->anatomy extension edges
+    (results_in_development_of RO:0002296, results_in_acquisition_of_features_of
+    RO:0002315, acts_on_population_of RO:0012003) alongside backbone occurs_in
+    placements; none of the extension edges should be flagged, and the model
+    must keep its full count of standard annotations (regression guard for the
+    over-flagging bug found in review)."""
+    g = builder.parse_ttl("resources/test/MGI_MGI_1100089.ttl")
+    assert len(g.standard_annotations) == 28, \
+        f"expected 28 standard annotations, got {len(g.standard_annotations)}"
+
+    extension_rels = {
+        "http://purl.obolibrary.org/obo/RO_0002296",  # results in development of
+        "http://purl.obolibrary.org/obo/RO_0002315",  # results in acquisition of features of
+        "http://purl.obolibrary.org/obo/RO_0012003",  # acts on population of
+    }
+    for key in ("invalid_bp_cc_relation", "invalid_gp_cc_relation",
+                "invalid_mf_cc_relation", "invalid_gp_bp_relation",
+                "invalid_mf_bp_relation"):
+        assert _flagged_props(g, key).isdisjoint(extension_rels), \
+            f"{key} wrongly flagged an extension relation in MGI_MGI_1100089"
+
+
+# ---------------------------------------------------------------------------
+# Task 11: #11 cardinality — multiple_mf_bp
+# ---------------------------------------------------------------------------
+
+def test_multiple_mf_bp(builder):
+    gocam = builder.parse_ttl("resources/test/multi_mf_bp_example.ttl")
+    annots = gocam.standard_annotations + gocam.non_standard_annotations
+    # The old key must be gone everywhere.
+    for annot in annots:
+        assert "multiple_mf_part_of" not in annot.failed_checks, "old key must be gone"
+    # Both MF->BP edges are flagged: the part_of one and the acts_upstream one
+    # (not, e.g., the wrong edge twice).
+    assert _flagged_props(gocam, "multiple_mf_bp") == {
+        "http://purl.obolibrary.org/obo/BFO_0000050",   # part_of
+        "http://purl.obolibrary.org/obo/RO_0002264",    # acts_upstream_of_or_within
+    }
+    # And exactly two edges total are flagged.
+    flagged = set()
+    for annot in annots:
+        flagged |= annot.failed_checks.get("multiple_mf_bp", set())
+    assert len(flagged) == 2, f"both MF->BP edges should be flagged, got {len(flagged)}"
+
+
+# ---------------------------------------------------------------------------
+# Task 12: #12 cardinality — multiple_mf_anatomy
+# ---------------------------------------------------------------------------
+
+def test_multiple_mf_anatomy(builder):
+    gocam = builder.parse_ttl("resources/test/multi_mf_anatomy_example.ttl")
+    flagged = set()
+    for annot in gocam.standard_annotations + gocam.non_standard_annotations:
+        flagged |= annot.failed_checks.get("multiple_mf_anatomy", set())
+    assert len(flagged) == 2, f"both MF->anatomy edges should be flagged, got {len(flagged)}"
+
+
+# ---------------------------------------------------------------------------
+# Task 13: #13 — enabler_not_gp
+# ---------------------------------------------------------------------------
+
+def test_enabler_not_gp(builder):
+    gocam = builder.parse_ttl("resources/test/enabler_not_gp_example.ttl")
+    # Only the ChEBI enabler is flagged; the MGI enabler is not.
+    flagged_targets = set()
+    for annot in gocam.standard_annotations + gocam.non_standard_annotations:
+        for bnode_id in annot.failed_checks.get("enabler_not_gp", set()):
+            flagged_targets.add(str(annot.edges[bnode_id].target_type))
+    assert flagged_targets == {"http://purl.obolibrary.org/obo/CHEBI_15367"}
