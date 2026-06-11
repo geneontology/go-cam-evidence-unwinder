@@ -85,13 +85,13 @@ make clean-all  # Remove all target_* directories
 - Model ID, Title - Model identifier and title
 - Standard Annotations - Count of annotations passing all checks
 - Non-Standard Annotations - Count of annotations failing one or more checks
-- Multi-Evidence Annotations - Count of standard annotations with >1 evidence on any edge
+- Multi-Evidence Annotations - Count of **all** annotations (standard **and** non-standard) with >1 evidence on any edge
 - Mixed Annotation Type - "Yes" if model has both standard and non-standard annotations
 - MF-causal->MF Edges - Count of causal edges between molecular functions (in non-standard)
 - Edges w/o Evidence - Count of edges (OWL axioms with GO-CAM relations) that have no `lego:evidence` triple
 - Model State - Model state from `http://geneontology.org/lego/modelstate` (e.g., "production", "development")
 - Groups - Pipe-separated list of contributing groups from `http://purl.org/pav/providedBy` (resolved to labels if `--groups-yaml` provided, e.g., "MGI", "ZFIN", "SGD")
-- Multi-Evidence GO Terms - Pipe-separated list of resolved GO term labels from multi-evidence annotations (excludes URIs and CURIEs that couldn't be resolved to labels)
+- Multi-Evidence GO Terms - Pipe-separated list of resolved GO term labels from multi-evidence annotations. **Collected only from *standard* (splittable) multi-evidence annotations** — so this is blank for a model whose multi-evidence annotations are all non-standard, even when the "Multi-Evidence Annotations" count (which includes non-standard) is non-zero. Excludes URIs and CURIEs that couldn't be resolved to labels.
 
 **Note:** Models with `modelstate == "delete"` are automatically skipped during processing.
 
