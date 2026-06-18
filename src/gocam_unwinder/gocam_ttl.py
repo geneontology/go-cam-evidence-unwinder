@@ -1364,7 +1364,7 @@ if __name__ == "__main__":
                 if len(edge.evidence_uris) == 0:
                     no_evidence_edge_count += 1
 
-        if mixed_annotation_type == "Yes" and criteria_fail_output:
+        if criteria_fail_output:
             # print standard annotation fail_checks by edge
             go_cam_graph_builder.print_non_standard_annotation_failed_checks(gocam_graph, report_file=criteria_fail_output)
 
