@@ -972,56 +972,63 @@ class GoCamGraphBuilder:
             return self.go_aspector.is_cellular_component(parsed_curies[0])
         return False
 
+    def _backbone_role(self, edge: StandardAnnotationEdge):
+        """
+        Return the gene-product -> MF/BP/CC backbone role of `edge`, or None if
+        the edge is an annotation extension (not part of any backbone).
+
+        Backbone patterns (first match wins):
+          - "MF": predicate == enabled_by AND source is MF
+          - "BP": predicate in mf_bp_valid_relations (part_of OR the
+                  acts_upstream_of_or_within RO:0002264 family OR the
+                  causally_upstream_of_or_within RO:0002418 family) AND source is
+                  the ROOT MF (GO:0003674) AND target is BP
+          - "CC": predicate in {located_in, is_active_in} AND target is CC
+
+        The BP rule requires the source MF to be the root MF: a specific
+        (non-root) MF -part_of-> BP is an extension, not a BP backbone, so the
+        annotation it belongs to remains MF-led (the BP is contextual). Only the
+        canonical "BP-only" pattern (unknown/root MF part_of OR causally upstream
+        of a BP) counts as a BP backbone. The relation set is shared with the #5
+        invalid_mf_bp_relation check (self.mf_bp_valid_relations) so the two
+        cannot diverge; without an RO ontology it falls back to part_of only (the
+        upstream/causal families require RO).
+        """
+        if edge.property_uri == self.rel_enabled_by and self.uri_is_molecular_function(edge.source_type):
+            return "MF"
+        if (str(edge.property_uri) in self.mf_bp_valid_relations
+                and self._is_root_go_term(edge.source_type)
+                and self.uri_is_molecular_function(edge.source_type)
+                and self.uri_is_biological_process(edge.target_type)):
+            return "BP"
+        if (edge.property_uri in {self.rel_located_in, self.rel_is_active_in}
+                and self.uri_is_cellular_component(edge.target_type)):
+            return "CC"
+        return None
+
     def get_extension_edges(self, annot: StandardAnnotation) -> List[StandardAnnotationEdge]:
         """
         Return edges in `annot` that are annotation extensions —
-        edges that fall outside the gene-product -> MF/BP/CC backbone.
-
-        Backbone patterns (any match -> the edge is backbone, not extension):
-          1. MF backbone: predicate == enabled_by AND source is MF
-          2. BP backbone: predicate == part_of AND source is MF AND target is BP
-          3. CC backbone: predicate in {located_in, is_active_in} AND target is CC
+        edges that fall outside the gene-product -> MF/BP/CC backbone (see
+        _backbone_role for the backbone patterns).
 
         Multi-hop extensions (e.g., CL -part_of-> EMAPA reached via the BP node)
-        are returned because they fail to match any backbone pattern.
+        are returned because they fail to match any backbone pattern, as is a
+        specific (non-root) MF -part_of-> BP edge.
 
         The returned list preserves the order of `annot.edges`.
         """
-        enabled_by = URIRef(relations.lookup_label("enabled by"))
-        part_of = URIRef(relations.lookup_label("part of"))
-        located_in = URIRef(relations.lookup_label("located in"))
-        is_active_in = URIRef(relations.lookup_label("is active in"))
-        cc_predicates = {located_in, is_active_in}
-
-        backbone_bnode_ids = set()
-        for edge in annot.edges.values():
-            # Rule 1: MF backbone (MF -enabled_by-> GP). Also covers the
-            # MF-enabled_by-GP edge inside a BP or CC annotation.
-            if edge.property_uri == enabled_by and self.uri_is_molecular_function(edge.source_type):
-                backbone_bnode_ids.add(edge.bnode_id)
-                continue
-            # Rule 2: BP backbone (MF -part_of-> BP)
-            if (edge.property_uri == part_of
-                    and self.uri_is_molecular_function(edge.source_type)
-                    and self.uri_is_biological_process(edge.target_type)):
-                backbone_bnode_ids.add(edge.bnode_id)
-                continue
-            # Rule 3: CC backbone (GP -located_in/is_active_in-> CC)
-            if (edge.property_uri in cc_predicates
-                    and self.uri_is_cellular_component(edge.target_type)):
-                backbone_bnode_ids.add(edge.bnode_id)
-                continue
-
-        return [edge for edge in annot.edges.values() if edge.bnode_id not in backbone_bnode_ids]
+        return [edge for edge in annot.edges.values()
+                if self._backbone_role(edge) is None]
 
     def get_primary_go_terms(self, annot: StandardAnnotation) -> dict:
         """
         Return the primary GO term URIs of an annotation, grouped by aspect.
 
         The primary GO term per aspect is identified by which edge matches a
-        backbone pattern (same rules as get_extension_edges):
+        backbone pattern (see _backbone_role):
           - MF: source_type of an MF -enabled_by-> GP edge
-          - BP: target_type of an MF -part_of-> BP edge
+          - BP: target_type of a root-MF -part_of-> BP edge
           - CC: target_type of a   ? -located_in/is_active_in-> CC edge
 
         Returns a dict mapping aspect ("MF", "BP", "CC") to a list of primary
@@ -1030,29 +1037,18 @@ class GoCamGraphBuilder:
         annotation contains multiple matching backbone edges (rare in
         well-formed data, useful to surface).
         """
-        enabled_by = URIRef(relations.lookup_label("enabled by"))
-        part_of = URIRef(relations.lookup_label("part of"))
-        located_in = URIRef(relations.lookup_label("located in"))
-        is_active_in = URIRef(relations.lookup_label("is active in"))
-        cc_predicates = {located_in, is_active_in}
-
         primary = {}
         for edge in annot.edges.values():
-            # Rule 1: MF backbone -> primary MF is the source type
-            if edge.property_uri == enabled_by and self.uri_is_molecular_function(edge.source_type):
+            role = self._backbone_role(edge)
+            if role == "MF":
+                # MF backbone -> primary MF is the source type
                 primary.setdefault("MF", []).append(edge.source_type)
-                continue
-            # Rule 2: BP backbone -> primary BP is the target type
-            if (edge.property_uri == part_of
-                    and self.uri_is_molecular_function(edge.source_type)
-                    and self.uri_is_biological_process(edge.target_type)):
+            elif role == "BP":
+                # BP backbone -> primary BP is the target type
                 primary.setdefault("BP", []).append(edge.target_type)
-                continue
-            # Rule 3: CC backbone -> primary CC is the target type
-            if (edge.property_uri in cc_predicates
-                    and self.uri_is_cellular_component(edge.target_type)):
+            elif role == "CC":
+                # CC backbone -> primary CC is the target type
                 primary.setdefault("CC", []).append(edge.target_type)
-                continue
 
         return primary
 

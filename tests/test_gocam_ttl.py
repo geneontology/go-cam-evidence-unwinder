@@ -1,8 +1,16 @@
 import io
 import os
+import sys
 import pytest
 import rdflib
 from gocam_unwinder.gocam_ttl import GoCamGraph, GoCamGraphBuilder
+
+# debug_non_standard.py lives at the repo root (not under src/ or tests/), so
+# make the repo root importable for the remainders-report bucketing helpers.
+_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _REPO_ROOT not in sys.path:
+    sys.path.insert(0, _REPO_ROOT)
+from debug_non_standard import pick_lead_aspect
 
 ontology_file = "target/go_20250601.json"  # TODO: Make this GitHub-friendly, maybe LFS
 
@@ -1137,3 +1145,92 @@ def test_enabler_not_gp(builder):
         for bnode_id in annot.failed_checks.get("enabler_not_gp", set()):
             flagged_targets.add(str(annot.edges[bnode_id].target_type))
     assert flagged_targets == {"http://purl.obolibrary.org/obo/CHEBI_15367"}
+
+
+# ---------------------------------------------------------------------------
+# Remainders-report lead-aspect bucketing — MGI_MGI_2182965
+# ---------------------------------------------------------------------------
+
+def test_mgi_2182965_lead_aspect_is_mf(builder):
+    """MGI_MGI_2182965 has a single annotation whose lead aspect should be MF.
+
+    The annotation backbone is an MF (GO:0005515 protein binding) enabled_by
+    the Tifa gene product. It also has an MF -part_of-> BP edge (GO:0043123),
+    which currently makes BP win in pick_lead_aspect (priority BP > CC > MF),
+    mis-bucketing the annotation as nested_bp_extensions in the remainders
+    report. The lead aspect used for bucketing should be MF.
+    """
+    gocam = builder.parse_ttl("resources/test/MGI_MGI_2182965.ttl")
+
+    all_annots = gocam.standard_annotations + gocam.non_standard_annotations
+    assert len(all_annots) == 1, \
+        f"MGI_MGI_2182965 should have exactly one annotation, got {len(all_annots)}"
+    annot = all_annots[0]
+
+    lead_aspect = pick_lead_aspect(builder.get_primary_go_terms(annot))
+    assert lead_aspect == "MF", \
+        f"Expected lead aspect MF for MGI_MGI_2182965, got {lead_aspect}"
+
+
+def test_mgi_2182965_specific_mf_part_of_bp_is_not_backbone(builder):
+    """A specific (non-root) MF -part_of-> BP edge is an extension, not a BP backbone.
+
+    MGI_MGI_2182965's annotation has GO:0005515 (protein binding, a non-root MF)
+    -part_of-> GO:0043123 (BP). Because the MF is specific, that edge must NOT
+    register a BP primary (so the annotation stays MF-led) and must appear among
+    the extension edges. The root MF backbone (GO:0003674 -part_of-> BP) in
+    5966411600000001 is unaffected (covered by test_get_primary_go_terms).
+    """
+    gocam = builder.parse_ttl("resources/test/MGI_MGI_2182965.ttl")
+    all_annots = gocam.standard_annotations + gocam.non_standard_annotations
+    assert len(all_annots) == 1
+    annot = all_annots[0]
+
+    # Only an MF primary should be registered (no BP backbone from the specific MF).
+    primaries = builder.get_primary_go_terms(annot)
+    assert set(primaries.keys()) == {"MF"}, \
+        f"Expected only an MF primary, got {set(primaries.keys())}"
+    assert [str(u) for u in primaries["MF"]] == ["http://purl.obolibrary.org/obo/GO_0005515"]
+
+    # The specific-MF -part_of-> BP edge must now be classified as an extension.
+    extension_tuples = {
+        (str(e.property_uri), str(e.source_type), str(e.target_type))
+        for e in builder.get_extension_edges(annot)
+    }
+    mf_part_of_bp = (
+        "http://purl.obolibrary.org/obo/BFO_0000050",
+        "http://purl.obolibrary.org/obo/GO_0005515",
+        "http://purl.obolibrary.org/obo/GO_0043123",
+    )
+    assert mf_part_of_bp in extension_tuples, \
+        f"Specific-MF -part_of-> BP edge should be an extension, got {extension_tuples}"
+
+
+def test_causal_root_mf_to_bp_is_backbone(builder):
+    """A root-MF -causally_upstream_of_or_within-> BP edge is a BP backbone.
+
+    The canonical MOD "BP-only" annotation uses a relation in the RO:0002418
+    (causally upstream of or within) family, not part_of, from the root MF
+    (GO:0003674) to the BP. get_primary_go_terms must register a BP primary for
+    it (so the annotation is BP-led), matching the relation set already accepted
+    by the #5 invalid_mf_bp_relation check (part_of OR acts_upstream OR causal).
+    Uses the passing causal edge in mf_bp_relation_example.ttl.
+    """
+    gocam = builder.parse_ttl("resources/test/mf_bp_relation_example.ttl")
+    bp1 = rdflib.term.URIRef(
+        "http://model.geneontology.org/mf_bp_relation_example/bp1")
+    annot = None
+    for a in gocam.standard_annotations + gocam.non_standard_annotations:
+        if bp1 in a.individuals:
+            annot = a
+            break
+    assert annot is not None, "annotation containing bp1 should exist"
+
+    primaries = builder.get_primary_go_terms(annot)
+    assert "BP" in primaries, \
+        f"root-MF -causal-> BP should register a BP backbone, got {set(primaries.keys())}"
+    assert [str(u) for u in primaries["BP"]] == ["http://purl.obolibrary.org/obo/GO_0006954"]
+
+    # And that edge is therefore NOT an extension.
+    assert builder.get_extension_edges(annot) == [], \
+        "the root-MF -causal-> BP backbone edge should not be an extension"

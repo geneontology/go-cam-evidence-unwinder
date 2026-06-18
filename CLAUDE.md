@@ -217,7 +217,9 @@ When writing implementation plans, use the template at `docs/plans/PLAN-TEMPLATE
   - `term_label()`: Looks up human-readable labels for GO/RO/BFO terms from stored ontologies
   - `filter_out_non_std_annotations()`: Applies all filtering checks and tracks failures
   - `print_non_standard_annotation_failed_checks()`: Outputs TSV report of failed checks with term labels
-  - `get_extension_edges()`: Returns the edges of a `StandardAnnotation` that are annotation extensions (i.e., not part of the gene-product → MF/BP/CC backbone)
+  - `_backbone_role()`: Returns the gene-product → MF/BP/CC backbone role of an edge (`"MF"` | `"BP"` | `"CC"` | `None`). MF = `enabled_by` with an MF source; BP = a relation in `self.mf_bp_valid_relations` (`part_of` ∪ the `acts_upstream_of_or_within` RO:0002264 family ∪ the `causally_upstream_of_or_within` RO:0002418 family) from a **root** MF (GO:0003674) to a BP; CC = `located_in`/`is_active_in` to a CC. The root-MF gate on the BP rule means a *specific* (non-root) MF `─part_of→` BP is an extension, not a BP backbone — so such annotations stay MF-led (the BP is contextual). Only the canonical "BP-only" pattern (unknown/root MF `part_of` **or** causally upstream of a BP) counts as a BP backbone. The relation set is shared with the #5 `invalid_mf_bp_relation` check so they cannot diverge; without an RO ontology it falls back to `part_of` only (the upstream/causal families require RO). Shared by `get_extension_edges()` and `get_primary_go_terms()`
+  - `get_extension_edges()`: Returns the edges of a `StandardAnnotation` that are annotation extensions (i.e., `_backbone_role()` is `None`)
+  - `get_primary_go_terms()`: Returns a dict mapping aspect (`"MF"`/`"BP"`/`"CC"`) to the list of primary GO term URIs identified via `_backbone_role()` (MF→source_type, BP/CC→target_type). The remainders-report "lead aspect" is picked from these keys by priority BP > CC > MF (`pick_lead_aspect` in `debug_non_standard.py`), so the root-MF BP gate keeps specific-MF annotations MF-led
 
 **`load_groups_lookup(groups_yaml_path)`** (`src/gocam_unwinder/gocam_ttl.py:65-88`)
 - Loads groups.yaml from go-site and creates a URI → label lookup dictionary
@@ -394,7 +396,7 @@ Tests use real GO-CAM model examples in `resources/test/`:
   - Evidence is otherwise identical (same ECO, PMID, contributor) — only dates and dcterms:created presence differ
   - Used to test date-tolerant evidence grouping and date update during splitting
 - **5966411600000001.ttl**: Mouse stereocilium maintenance model with the `GO:0120045` BP annotation as a 5-edge subgraph
-  - 2 backbone edges (`MF─enabled_by→GP`, `MF─part_of→BP`) plus 3 extension edges including the chain `BP─occurs_in→CL─part_of→EMAPA`
+  - 2 backbone edges (`MF─enabled_by→GP`, `root-MF─part_of→BP` — the MF is the root term GO:0003674, so this is a true BP backbone) plus 3 extension edges including the chain `BP─occurs_in→CL─part_of→EMAPA`
   - Used to test `get_extension_edges()` (backbone vs. extension classification across all three GO aspects)
 - **mf_occurs_in_anatomy_example.ttl**: Synthetic single-edge annotation `MF ─occurs_in→ WBbt:0006796` (anatomy) (Issue #22)
   - Regression fixture for `invalid_gp_mf_relation`: under the old `{GO, RO, BFO}` blocklist the anatomy target was misclassified as a GP and falsely flagged; the `GP_NAMESPACE_KEYS` allowlist now correctly ignores it
@@ -408,6 +410,7 @@ Tests use real GO-CAM model examples in `resources/test/`:
   - Used to test `invalid_gp_bp_relation` check (#4, RO-dependent): only the wrong-relation edge is flagged
 - **mf_bp_relation_example.ttl**: Synthetic model with a passing `root-MF─causally_upstream_of_or_within→BP` and a failing `root-MF─located_in→BP` edge
   - Used to test `invalid_mf_bp_relation` check (#5, RO-dependent): only the wrong-relation edge is flagged
+  - Also used by `test_causal_root_mf_to_bp_is_backbone` to confirm the causal edge is recognized as a BP backbone by `_backbone_role()`
 - **mf_cc_relation_example.ttl**: Synthetic model with a passing `root-MF─is_active_in→CC` and a failing `root-MF─located_in→CC` edge
   - Used to test `invalid_mf_cc_relation` check (#6): only the wrong-relation edge is flagged
 - **multi_mf_bp_example.ttl**: Synthetic annotation where one MF connects to two BPs via `part_of` and `acts_upstream_of_or_within`
@@ -416,6 +419,8 @@ Tests use real GO-CAM model examples in `resources/test/`:
   - Used to test `multiple_mf_anatomy` cardinality check (#12): both MF→anatomy edges are flagged
 - **enabler_not_gp_example.ttl**: Synthetic model with a passing `MF─enabled_by→MGI-GP` and a failing `MF─enabled_by→CHEBI` edge
   - Used to test `enabler_not_gp` check (#13): only the ChEBI-enabled edge is flagged
+- **MGI_MGI_2182965.ttl**: Mouse Tifa model with a single annotation whose backbone is a *specific* MF (`GO:0005515` protein binding) `─enabled_by→` the Tifa gene product, plus a `specific-MF ─part_of→ BP` (`GO:0043123`) edge
+  - Used to test the root-MF gate on the BP backbone (`_backbone_role`): the specific MF keeps the annotation MF-led (lead aspect MF, not BP), so it buckets as `nested_mf_extensions` rather than `nested_bp_extensions` in the remainders report
 
 The test requires the GO ontology file at `target/go_20250601.json` (downloaded via Makefile). The MF-causal->MF test also requires `resources/test/ro_20250723.owl`.
 
@@ -469,7 +474,7 @@ The test requires the GO ontology file at `target/go_20250601.json` (downloaded 
   - Verifies edge labels can be resolved via `term_label()`
 - `test_get_extension_edges()`: Tests `get_extension_edges()` backbone-vs-extension classification on the 5-edge GO:0120045 annotation in 5966411600000001.ttl:
   - Returns exactly the 3 expected extension edges, identified by `(predicate, source_type, target_type)` tuples
-  - Confirms the 2 remaining backbone edges (MF-enabled_by-GP and MF-part_of-BP) are not in the result
+  - Confirms the 2 remaining backbone edges (MF-enabled_by-GP and root-MF-part_of-BP) are not in the result
   - Searches both `standard_annotations` and `non_standard_annotations` since the method works regardless of classification
 - `test_gene_product_namespace_key()`: Unit test for `_gene_product_namespace_key()` (Issue #22):
   - Maps MOD / ComplexPortal / PR URIs (including MGI's double-prefixed form and the PomBase compact-colon form `identifiers.org/PomBase:...`) to the expected `GP_NAMESPACE_KEYS` keys
@@ -491,3 +496,6 @@ The test requires the GO ontology file at `target/go_20250601.json` (downloaded 
 - `test_multiple_mf_bp()`: Tests that both MF→BP edges in multi_mf_bp_example.ttl are flagged under `multiple_mf_bp` (the new key), and the old `multiple_mf_part_of` key is absent
 - `test_multiple_mf_anatomy()`: Tests that both MF→anatomy edges in multi_mf_anatomy_example.ttl are flagged under `multiple_mf_anatomy`
 - `test_enabler_not_gp()`: Tests that only the ChEBI-enabled edge in enabler_not_gp_example.ttl is flagged under `enabler_not_gp`
+- `test_mgi_2182965_lead_aspect_is_mf()`: Tests that MGI_MGI_2182965's single annotation has remainders-report lead aspect MF (not BP), via `pick_lead_aspect(builder.get_primary_go_terms(annot))` (imported from `debug_non_standard.py`). Regression for the root-MF BP gate: the specific MF (`GO:0005515`) `─part_of→` BP must not make BP win
+- `test_mgi_2182965_specific_mf_part_of_bp_is_not_backbone()`: Tests that for MGI_MGI_2182965 `get_primary_go_terms()` returns only an `MF` key (primary `GO:0005515`, no `BP`) and that the specific-MF `─part_of→` BP edge appears in `get_extension_edges()` — confirming `_backbone_role()`'s root-MF gate classifies it as an extension
+- `test_causal_root_mf_to_bp_is_backbone()`: Tests that a `root-MF ─causally_upstream_of_or_within (RO:0002418)→ BP` edge (the passing causal edge in mf_bp_relation_example.ttl) is a BP backbone — `get_primary_go_terms()` registers the BP primary (`GO:0006954`) and the edge is not in `get_extension_edges()`. Confirms `_backbone_role()` accepts the full `mf_bp_valid_relations` set, not just `part_of`
