@@ -120,9 +120,12 @@ def main():
     ap.add_argument("--skip-file", dest="skip_file",
                     help="Skip TTL files whose filename appears in FILE (one .ttl filename per line, e.g. true GO-CAM models to exclude)")
     ap.add_argument("--tsv-output", help="TSV output file for bucketed annotation report")
+    ap.add_argument("--no-label-api", action="store_true",
+                    help="Disable OLS API fallback for resolving non-GO/RO term labels (enabled by default)")
     args = ap.parse_args()
 
-    builder = GoCamGraphBuilder(args.ontology, args.ro, args.groups_yaml)
+    builder = GoCamGraphBuilder(args.ontology, args.ro, args.groups_yaml,
+                                resolve_labels_api=not args.no_label_api)
 
     skip_filenames = load_skip_filenames(args.skip_file) if args.skip_file else set()
     ttl_files = sorted(collect_model_files(

@@ -2,6 +2,7 @@ import io
 import os
 import sys
 import pytest
+import requests
 import rdflib
 from gocam_unwinder.gocam_ttl import GoCamGraph, GoCamGraphBuilder
 
@@ -1234,3 +1235,246 @@ def test_causal_root_mf_to_bp_is_backbone(builder):
     # And that edge is therefore NOT an extension.
     assert builder.get_extension_edges(annot) == [], \
         "the root-MF -causal-> BP backbone edge should not be an extension"
+
+
+def test_builder_api_state_defaults(builder):
+    # The shared fixture is constructed offline (resolve_labels_api=False),
+    # but the cache/circuit-breaker state must still be initialized.
+    assert builder.resolve_labels_api is False
+    assert builder._api_label_cache == {}
+    assert builder._api_session is None
+    assert builder._api_consecutive_failures == 0
+    assert builder._api_disabled is False
+    assert GoCamGraphBuilder.OLS4_TERMS_URL == "https://www.ebi.ac.uk/ols4/api/terms"
+    assert GoCamGraphBuilder.OLS4_TIMEOUT == 10
+    assert GoCamGraphBuilder.OLS4_MAX_CONSECUTIVE_FAILURES == 5
+
+
+def test_select_label_prefers_defining_ontology(builder):
+    # CL_0000540: cl is defining ("neuron"); caro carries a junk label == the ID.
+    terms = [
+        {"ontology_name": "ado", "label": "neuron", "is_defining_ontology": False},
+        {"ontology_name": "caro", "label": "CL_0000540", "is_defining_ontology": False},
+        {"ontology_name": "cl", "label": "neuron", "is_defining_ontology": True},
+    ]
+    assert builder._select_label(terms, "CL:0000540") == "neuron"
+
+
+def test_select_label_prefix_match_when_no_defining(builder):
+    # UBERON_0000955: no defining flag in results; pick the term whose
+    # ontology_name matches the CURIE prefix.
+    terms = [
+        {"ontology_name": "fma", "label": "Brain", "is_defining_ontology": False},
+        {"ontology_name": "uberon", "label": "brain", "is_defining_ontology": False},
+    ]
+    assert builder._select_label(terms, "UBERON:0000955") == "brain"
+
+
+def test_select_label_first_real_label_fallback(builder):
+    # No defining flag, no prefix match -> first term with a real label.
+    terms = [
+        {"ontology_name": "x", "label": "EMAPA_16894", "is_defining_ontology": False},
+        {"ontology_name": "y", "label": "brain", "is_defining_ontology": False},
+    ]
+    assert builder._select_label(terms, "EMAPA:16894") == "brain"
+
+
+def test_select_label_single_defining(builder):
+    terms = [{"ontology_name": "wbbt", "label": "germ cell", "is_defining_ontology": True}]
+    assert builder._select_label(terms, "WBbt:0006796") == "germ cell"
+
+
+def test_select_label_empty_returns_none(builder):
+    assert builder._select_label([], "CL:9999999999") is None
+
+
+def test_select_label_only_junk_returns_none(builder):
+    # Every candidate's label is just the ID fragment or the CURIE itself.
+    terms = [
+        {"ontology_name": "caro", "label": "CL_0000540", "is_defining_ontology": False},
+        {"ontology_name": "z", "label": "CL:0000540", "is_defining_ontology": True},
+    ]
+    assert builder._select_label(terms, "CL:0000540") is None
+
+
+def test_select_label_defining_junk_falls_through_to_real(builder):
+    # Defining term has a junk label (== ID) and there is no prefix match;
+    # rule 3 returns the first term with any real label.
+    terms = [
+        {"ontology_name": "caro", "label": "CL_0000540", "is_defining_ontology": True},
+        {"ontology_name": "ado", "label": "neuron", "is_defining_ontology": False},
+    ]
+    assert builder._select_label(terms, "CL:0000540") == "neuron"
+
+
+# ---------------------------------------------------------------------------
+# Fake network helpers for _fetch_label_from_ols tests
+# ---------------------------------------------------------------------------
+
+class _FakeResponse:
+    def __init__(self, payload, ok=True):
+        self._payload = payload
+        self._ok = ok
+
+    def raise_for_status(self):
+        if not self._ok:
+            raise requests.HTTPError("simulated non-2xx")
+
+    def json(self):
+        return self._payload
+
+
+class _FakeSession:
+    """Stand-in for requests.Session that returns a canned response or raises."""
+    def __init__(self, response=None, exc=None):
+        self.response = response
+        self.exc = exc
+        self.calls = 0
+        self.headers = {}
+
+    def get(self, url, params=None, timeout=None):
+        self.calls += 1
+        if self.exc is not None:
+            raise self.exc
+        return self.response
+
+
+def _ols_payload(terms):
+    return {"_embedded": {"terms": terms}}
+
+
+def test_fetch_label_from_ols_success(builder):
+    builder._api_consecutive_failures = 0
+    builder._api_disabled = False
+    terms = [{"ontology_name": "cl", "label": "neuron", "is_defining_ontology": True}]
+    builder._api_session = _FakeSession(response=_FakeResponse(_ols_payload(terms)))
+    uri = rdflib.URIRef("http://purl.obolibrary.org/obo/CL_0000540")
+    assert builder._fetch_label_from_ols(uri, "CL:0000540") == "neuron"
+    assert builder._api_session.calls == 1
+    assert builder._api_consecutive_failures == 0
+    assert builder._api_disabled is False
+
+
+def test_fetch_label_from_ols_network_error_returns_none(builder):
+    builder._api_consecutive_failures = 0
+    builder._api_disabled = False
+    builder._api_session = _FakeSession(exc=requests.ConnectionError("down"))
+    uri = rdflib.URIRef("http://purl.obolibrary.org/obo/CL_0000540")
+    assert builder._fetch_label_from_ols(uri, "CL:0000540") is None
+    assert builder._api_consecutive_failures == 1
+
+
+def test_fetch_label_from_ols_circuit_breaker(builder):
+    builder._api_consecutive_failures = 0
+    builder._api_disabled = False
+    builder._api_session = _FakeSession(exc=requests.ConnectionError("down"))
+    uri = rdflib.URIRef("http://purl.obolibrary.org/obo/CL_0000540")
+    for _ in range(GoCamGraphBuilder.OLS4_MAX_CONSECUTIVE_FAILURES):
+        assert builder._fetch_label_from_ols(uri, "CL:0000540") is None
+    assert builder._api_disabled is True
+    # Once disabled, no further network calls are made.
+    builder._api_session.calls = 0
+    assert builder._fetch_label_from_ols(uri, "CL:0000540") is None
+    assert builder._api_session.calls == 0
+    # Restore the session-scoped fixture to a clean state for later tests.
+    builder._api_disabled = False
+    builder._api_consecutive_failures = 0
+    builder._api_session = None
+
+
+def test_fetch_label_from_ols_http_error_returns_none(builder):
+    builder._api_consecutive_failures = 0
+    builder._api_disabled = False
+    builder._api_session = _FakeSession(response=_FakeResponse({}, ok=False))
+    uri = rdflib.URIRef("http://purl.obolibrary.org/obo/CL_0000540")
+    assert builder._fetch_label_from_ols(uri, "CL:0000540") is None
+    assert builder._api_consecutive_failures == 1
+
+
+def test_fetch_label_from_ols_non_dict_json_returns_none(builder):
+    builder._api_consecutive_failures = 0
+    builder._api_disabled = False
+    # A JSON body that parses but isn't the expected dict (e.g. a list).
+    builder._api_session = _FakeSession(response=_FakeResponse([]))
+    uri = rdflib.URIRef("http://purl.obolibrary.org/obo/CL_0000540")
+    assert builder._fetch_label_from_ols(uri, "CL:0000540") is None
+    assert builder._api_consecutive_failures == 1
+    # Restore clean state for the session-scoped fixture.
+    builder._api_consecutive_failures = 0
+    builder._api_disabled = False
+    builder._api_session = None
+
+
+# ---------------------------------------------------------------------------
+# term_label() API fallback integration tests
+# ---------------------------------------------------------------------------
+
+@pytest.fixture
+def api_builder(builder):
+    """Shared builder with the OLS fallback enabled and a clean cache.
+
+    Restores offline state afterward so the session-scoped builder stays
+    hermetic for every other test.
+    """
+    builder.resolve_labels_api = True
+    builder._api_label_cache.clear()
+    builder._api_consecutive_failures = 0
+    builder._api_disabled = False
+    builder._api_session = None
+    try:
+        yield builder
+    finally:
+        builder.resolve_labels_api = False
+        builder._api_session = None
+        builder._api_label_cache.clear()
+        builder._api_consecutive_failures = 0
+        builder._api_disabled = False
+
+
+def test_term_label_api_fallback(api_builder):
+    terms = [{"ontology_name": "cl", "label": "neuron", "is_defining_ontology": True}]
+    api_builder._api_session = _FakeSession(response=_FakeResponse(_ols_payload(terms)))
+    uri = rdflib.URIRef("http://purl.obolibrary.org/obo/CL_0000540")
+    assert api_builder.term_label(uri) == "neuron"
+
+
+def test_term_label_api_cached_once(api_builder):
+    terms = [{"ontology_name": "cl", "label": "neuron", "is_defining_ontology": True}]
+    session = _FakeSession(response=_FakeResponse(_ols_payload(terms)))
+    api_builder._api_session = session
+    uri = rdflib.URIRef("http://purl.obolibrary.org/obo/CL_0000540")
+    assert api_builder.term_label(uri) == "neuron"
+    assert api_builder.term_label(uri) == "neuron"
+    assert session.calls == 1  # second call served from cache
+
+
+def test_term_label_api_miss_negative_cached(api_builder):
+    session = _FakeSession(response=_FakeResponse(_ols_payload([])))  # 0 terms
+    api_builder._api_session = session
+    uri = rdflib.URIRef("http://purl.obolibrary.org/obo/CL_9999999999")
+    assert api_builder.term_label(uri) == "CL:9999999999"   # falls back to CURIE
+    assert api_builder.term_label(uri) == "CL:9999999999"
+    assert session.calls == 1  # miss is cached; not re-queried
+
+
+def test_term_label_api_disabled_no_network(builder, monkeypatch):
+    # The default shared builder is offline; the fetch helper must never run.
+    def _boom(*a, **k):
+        raise AssertionError("API must not be called when resolve_labels_api is False")
+    monkeypatch.setattr(builder, "_fetch_label_from_ols", _boom)
+    uri = rdflib.URIRef("http://purl.obolibrary.org/obo/CL_0000540")
+    assert builder.term_label(uri) == "CL:0000540"
+
+
+def test_term_label_api_network_error_returns_curie(api_builder):
+    api_builder._api_session = _FakeSession(exc=requests.ConnectionError("down"))
+    uri = rdflib.URIRef("http://purl.obolibrary.org/obo/CL_0000540")
+    assert api_builder.term_label(uri) == "CL:0000540"   # never raises
+
+
+def test_gocam_ttl_parser_has_no_label_api_flag():
+    from gocam_unwinder.gocam_ttl import parser
+    # Absence of the flag defaults to False (resolution on by default).
+    assert parser.parse_args(["-o", "go.json"]).no_label_api is False
+    # Presence of the flag is True (-> resolve_labels_api=not True=False).
+    assert parser.parse_args(["-o", "go.json", "--no-label-api"]).no_label_api is True

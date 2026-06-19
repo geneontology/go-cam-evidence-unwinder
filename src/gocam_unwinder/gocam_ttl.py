@@ -3,6 +3,7 @@ import os
 import sys
 
 import ontobio.util.go_utils
+import requests
 import rdflib
 import yaml
 from ontobio.rdfgen import relations
@@ -26,6 +27,8 @@ parser.add_argument('--skip-file', dest='skip_file', metavar='FILE',
                     help="Skip TTL files whose filename appears in FILE (one .ttl filename per line, e.g. true GO-CAM models to exclude)")
 parser.add_argument('--groups-yaml', help="Path to groups.yaml for resolving group URIs to labels")
 parser.add_argument('--date-change-report', help="Output TSV file for date change report (model ID, title, original/new dates, edge labels)")
+parser.add_argument('--no-label-api', action='store_true',
+                    help="Disable OLS API fallback for resolving non-GO/RO term labels (enabled by default)")
 
 GOCAM_RELATIONS = [str(r) for r in relations.__relation_label_lookup.values()]
 
@@ -723,7 +726,14 @@ class GoCamGraphBuilder:
         "cl", "uberon", "emapa", "wbbt", "fbbt", "zfa", "ma", "po",
     }
 
-    def __init__(self, ontology_path, ro_ontology_path=None, groups_yaml_path=None):
+    # EBI OLS4 REST API for resolving labels of terms not in the local GO/RO
+    # ontologies (anatomy CL/UBERON/EMAPA/WBbt/..., plus CHEBI/ECO/PR/...).
+    OLS4_TERMS_URL = "https://www.ebi.ac.uk/ols4/api/terms"
+    OLS4_TIMEOUT = 10                  # connect + read timeout (seconds)
+    OLS4_MAX_CONSECUTIVE_FAILURES = 5  # disable API for the run after this many
+
+    def __init__(self, ontology_path, ro_ontology_path=None, groups_yaml_path=None,
+                 resolve_labels_api=True):
         # Store and parse the GO ontology
         self.ontology = ontobio.ontol_factory.OntologyFactory().create(ontology_path)
         self.go_aspector = ontobio.util.go_utils.GoAspector(self.ontology)
@@ -782,6 +792,15 @@ class GoCamGraphBuilder:
             {str(self.rel_located_in), str(self.rel_is_active_in),
              str(self.rel_occurs_in), str(self.rel_part_of)}
             | set(self.acts_upstream_relations) | set(self.causal_relations))
+
+        # OLS API label-resolution state. The cache maps an IRI string to a
+        # label (str) or None (negative-cached miss), so each ID is queried at
+        # most once per run. The session is created lazily on first fetch.
+        self.resolve_labels_api = resolve_labels_api
+        self._api_label_cache = {}
+        self._api_session = None
+        self._api_consecutive_failures = 0
+        self._api_disabled = False
 
     def uri_is_causal_relation(self, uri: URIRef) -> bool:
         """
@@ -1204,6 +1223,69 @@ class GoCamGraphBuilder:
         go_cam_graph.non_standard_annotations = non_standard_annotations
         return go_cam_graph
 
+    def _fetch_label_from_ols(self, uri, curie):
+        """Query OLS4 for the label of ``uri``; return the label or None.
+
+        Never raises: network errors, non-2xx responses, and unparseable JSON
+        are treated as a miss (None). After OLS4_MAX_CONSECUTIVE_FAILURES
+        consecutive failures the API is disabled for the rest of the run so a
+        fully offline run does not make one doomed call per unique term.
+        """
+        if self._api_disabled:
+            return None
+        if self._api_session is None:
+            self._api_session = requests.Session()
+            self._api_session.headers.update(
+                {"User-Agent": "go-cam-evidence-unwinder/label-resolver"})
+        try:
+            resp = self._api_session.get(
+                self.OLS4_TERMS_URL,
+                params={"iri": str(uri), "size": 20},
+                timeout=self.OLS4_TIMEOUT,
+            )
+            resp.raise_for_status()
+            terms = resp.json().get("_embedded", {}).get("terms", [])
+            label = self._select_label(terms, curie)
+            self._api_consecutive_failures = 0   # reset on any successful response
+            return label
+        except (requests.RequestException, ValueError, AttributeError, TypeError):
+            self._api_consecutive_failures += 1
+            if self._api_consecutive_failures >= self.OLS4_MAX_CONSECUTIVE_FAILURES:
+                self._api_disabled = True
+            return None
+
+    def _select_label(self, terms, curie):
+        """Pick the best human-readable label from an OLS4 _embedded.terms list.
+
+        The same IRI may appear in several ontologies; importing ontologies
+        sometimes carry a junk label equal to the bare ID fragment. Priority:
+          1. a term flagged is_defining_ontology with a "real" label;
+          2. a term whose ontology_name matches the CURIE prefix (lowercased);
+          3. the first term with any "real" label;
+          4. None (caller falls back to the CURIE).
+        A label is "real" iff it is non-empty and not equal to the bare ID
+        fragment ("CL_0000540") or the CURIE itself ("CL:0000540").
+        """
+        if not terms:
+            return None
+        local_id = curie.replace(":", "_")          # "CL:0000540" -> "CL_0000540"
+        prefix = curie.split(":", 1)[0].lower()     # "CL:0000540" -> "cl"
+
+        def is_real(term):
+            label = term.get("label")
+            return bool(label) and label != local_id and label != curie
+
+        for term in terms:                          # rule 1
+            if term.get("is_defining_ontology") and is_real(term):
+                return term.get("label")
+        for term in terms:                          # rule 2
+            if term.get("ontology_name", "").lower() == prefix and is_real(term):
+                return term.get("label")
+        for term in terms:                          # rule 3
+            if is_real(term):
+                return term.get("label")
+        return None                                 # rule 4
+
     def term_label(self, uri: URIRef) -> str:
         """
         Look up the label for a term URI using the stored ontologies.
@@ -1228,6 +1310,16 @@ class GoCamGraphBuilder:
             # Look up rdfs:label in the RO graph
             for label in self.ro_ontology.objects(uri, rdflib.RDFS.label):
                 return str(label)
+
+        # API fallback for terms not in the local GO/RO ontologies (anatomy:
+        # CL/UBERON/EMAPA/WBbt/..., plus CHEBI/ECO/PR/...). Cache hits and
+        # misses so any IRI is queried at most once per run.
+        if self.resolve_labels_api:
+            iri = str(uri)
+            if iri not in self._api_label_cache:
+                self._api_label_cache[iri] = self._fetch_label_from_ols(uri, curie)
+            if self._api_label_cache[iri]:
+                return self._api_label_cache[iri]
 
         # Fall back to CURIE
         return str(curie)
@@ -1279,7 +1371,8 @@ if __name__ == "__main__":
             model_id_filter=model_id_filter,
         )
 
-    go_cam_graph_builder = GoCamGraphBuilder(args.ontology_filename, args.ro_filename, args.groups_yaml)
+    go_cam_graph_builder = GoCamGraphBuilder(args.ontology_filename, args.ro_filename, args.groups_yaml,
+                                             resolve_labels_api=not args.no_label_api)
 
     # Open report file if specified, otherwise use stdout
     report_file = None

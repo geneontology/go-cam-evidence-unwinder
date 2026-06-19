@@ -40,6 +40,9 @@ DATE_CHANGE_REPORT := $(TARGET_DIR)/date_changes_$(DATE).tsv
 NON_STD_REPORT := $(TARGET_DIR)/remainders_report_$(DATE).tsv
 NON_STD_LOG := $(TARGET_DIR)/remainders_report_$(DATE).log
 
+# Google Drive folder for published report sheets (override on the CLI if needed)
+GDRIVE_FOLDER_ID ?= 1ORulffGbEQANu8-jViGJaFn-mPMpQRfs
+
 # Default target
 .PHONY: all test clean pipeline
 all: pipeline
@@ -178,6 +181,24 @@ $(NON_STD_REPORT): $(GO_ONTOLOGY) $(RO_ONTOLOGY) $(GROUPS_YAML)
 
 .PHONY: non_std
 non_std: $(NON_STD_REPORT)
+
+# Publish whichever of the three reports exist in $(TARGET_DIR) to Google Drive as
+# Sheets via tsv2sheet. Push-only: does not build the reports. Missing reports are
+# skipped; a failed upload aborts. Use DATE=YYYYMMDD to target a specific run's folder.
+.PHONY: push-reports
+push-reports:
+	@set -e; \
+	push() { \
+		if [ -f "$$1" ]; then \
+			echo "Pushing $$1 -> Google Drive folder $(GDRIVE_FOLDER_ID) as \"$$2\""; \
+			tsv2sheet --folder-id $(GDRIVE_FOLDER_ID) --title "$$2" "$$1"; \
+		else \
+			echo "Skipping $$1 (not found)"; \
+		fi; \
+	}; \
+	push "$(REPORT_FILE)" "Standard annotation model stats $(DATE)"; \
+	push "$(CRITERIA_FAIL_REPORT)" "Standard annotation criteria failures $(DATE)"; \
+	push "$(NON_STD_REPORT)" "Non-standard annotation remainders $(DATE)"
 
 # Clean up generated files
 clean:
