@@ -15,6 +15,10 @@ from debug_non_standard import pick_lead_aspect
 
 ontology_file = "target/go_20250601.json"  # TODO: Make this GitHub-friendly, maybe LFS
 
+# Relation URIs used by the nested-anatomy-fix plan tests.
+OCCURS_IN = "http://purl.obolibrary.org/obo/BFO_0000066"
+PART_OF = "http://purl.obolibrary.org/obo/BFO_0000050"
+
 def test_gocam_ttl(builder):
 
     # Positive test case: MGI_MGI_1100089 has consistent evidence across edges
@@ -1478,3 +1482,138 @@ def test_gocam_ttl_parser_has_no_label_api_flag():
     assert parser.parse_args(["-o", "go.json"]).no_label_api is False
     # Presence of the flag is True (-> resolve_labels_api=not True=False).
     assert parser.parse_args(["-o", "go.json", "--no-label-api"]).no_label_api is True
+
+
+def test_get_primary_individuals(builder):
+    """
+    get_primary_individuals() returns the backbone *individual* URIs per aspect.
+    On 5966411600000001.ttl's GO:0120045 annotation:
+      - MF backbone (MF -enabled_by-> GP) -> primary MF individual = ...0003
+      - BP backbone (root-MF -part_of-> BP) -> primary BP individual = ...0004
+      - no CC backbone -> "CC" absent
+    """
+    gocam_graph = builder.parse_ttl("resources/test/5966411600000001.ttl")
+
+    bp_individual = rdflib.term.URIRef(
+        'http://model.geneontology.org/5966411600000001/5966411600000004')
+    target_annot = None
+    for annot in gocam_graph.standard_annotations + gocam_graph.non_standard_annotations:
+        if bp_individual in annot.individuals:
+            target_annot = annot
+            break
+    assert target_annot is not None, \
+        "Annotation containing the GO:0120045 individual should exist"
+
+    primaries = builder.get_primary_individuals(target_annot)
+
+    assert set(primaries.keys()) == {"MF", "BP"}, \
+        f"Expected {{'MF','BP'}}, got {set(primaries.keys())}"
+    assert len(primaries["MF"]) == 1 and len(primaries["BP"]) == 1
+    assert str(primaries["MF"][0]) == \
+        "http://model.geneontology.org/5966411600000001/5966411600000003"
+    assert str(primaries["BP"][0]) == \
+        "http://model.geneontology.org/5966411600000001/5966411600000004"
+    assert "CC" not in primaries
+
+
+def test_rewrite_edge_source_and_relation(builder):
+    """
+    rewrite_edge_source_and_relation re-points the CL -part_of-> EMAPA nested edge
+    in 5966411600000001.ttl onto the primary BP individual with occurs_in, updating
+    BOTH the assertion triple and the owl:Axiom bnode, preserving target + evidence.
+    """
+    gocam_graph = builder.parse_ttl("resources/test/5966411600000001.ttl")
+
+    cl_type = rdflib.term.URIRef("http://purl.obolibrary.org/obo/CL_0000202")
+    emapa_type = rdflib.term.URIRef("http://purl.obolibrary.org/obo/EMAPA_17597")
+    part_of = rdflib.term.URIRef("http://purl.obolibrary.org/obo/BFO_0000050")
+    occurs_in = rdflib.term.URIRef("http://purl.obolibrary.org/obo/BFO_0000066")
+    bp_individual = rdflib.term.URIRef(
+        "http://model.geneontology.org/5966411600000001/5966411600000004")
+
+    # Locate the nested CL -part_of-> EMAPA edge.
+    edge = None
+    for annot in gocam_graph.standard_annotations + gocam_graph.non_standard_annotations:
+        for e in annot.edges.values():
+            if e.source_type == cl_type and e.target_type == emapa_type and e.property_uri == part_of:
+                edge = e
+                break
+        if edge:
+            break
+    assert edge is not None, "Expected a CL -part_of-> EMAPA edge"
+
+    old_source = edge.source_uri      # the CL individual (...0009)
+    target = edge.target_uri          # the EMAPA individual (...0010)
+    axiom_bnode = rdflib.term.BNode(edge.bnode_id)
+    # Capture evidence on the axiom bnode before the rewrite.
+    evidence_pred = rdflib.term.URIRef("http://geneontology.org/lego/evidence")
+    evidence_before = set(gocam_graph.g.objects(axiom_bnode, evidence_pred))
+    assert evidence_before, "Nested edge axiom should have evidence"
+
+    gocam_graph.rewrite_edge_source_and_relation(
+        edge.bnode_id, old_source, part_of, target, bp_individual, occurs_in)
+
+    g = gocam_graph.g
+    # Assertion triple rewritten
+    assert (bp_individual, occurs_in, target) in g
+    assert (old_source, part_of, target) not in g
+    # Axiom bnode rewritten
+    assert (axiom_bnode, rdflib.namespace.OWL.annotatedSource, bp_individual) in g
+    assert (axiom_bnode, rdflib.namespace.OWL.annotatedSource, old_source) not in g
+    assert (axiom_bnode, rdflib.namespace.OWL.annotatedProperty, occurs_in) in g
+    assert (axiom_bnode, rdflib.namespace.OWL.annotatedProperty, part_of) not in g
+    # Target + evidence preserved
+    assert (axiom_bnode, rdflib.namespace.OWL.annotatedTarget, target) in g
+    assert set(g.objects(axiom_bnode, evidence_pred)) == evidence_before
+
+
+def test_plan_nested_anatomy_fixes_bp(builder):
+    """BP-led real fixture: exactly the CL -part_of-> EMAPA edge is planned,
+    re-pointed onto the primary BP individual (...0004) with occurs_in."""
+    gocam_graph = builder.parse_ttl("resources/test/5966411600000001.ttl")
+    plan = builder.plan_nested_anatomy_fixes(gocam_graph)
+
+    assert len(plan) == 1, f"Expected 1 rewrite, got {len(plan)}"
+    r = plan[0]
+    assert r["lead_aspect"] == "BP"
+    assert str(r["new_property_uri"]) == OCCURS_IN
+    assert str(r["old_property_uri"]) == PART_OF
+    assert str(r["new_source_uri"]) == \
+        "http://model.geneontology.org/5966411600000001/5966411600000004"
+    assert str(r["old_source_uri"]) == \
+        "http://model.geneontology.org/5966411600000001/5966411600000009"
+    assert str(r["target_uri"]) == \
+        "http://model.geneontology.org/5966411600000001/5966411600000010"
+    assert str(r["primary_term"]) == "http://purl.obolibrary.org/obo/GO_0120045"
+    assert str(r["old_source_type"]) == "http://purl.obolibrary.org/obo/CL_0000202"
+    assert str(r["target_type"]) == "http://purl.obolibrary.org/obo/EMAPA_17597"
+
+
+def test_plan_nested_anatomy_fixes_mf(builder):
+    """MF-led synthetic fixture: nested CL -part_of-> EMAPA re-pointed onto the
+    primary MF individual with occurs_in (MF/BP-led relation)."""
+    gocam_graph = builder.parse_ttl("resources/test/mf_nested_anatomy_example.ttl")
+    plan = builder.plan_nested_anatomy_fixes(gocam_graph)
+
+    assert len(plan) == 1
+    r = plan[0]
+    assert r["lead_aspect"] == "MF"
+    assert str(r["new_property_uri"]) == OCCURS_IN
+    assert str(r["new_source_uri"]) == \
+        "http://model.geneontology.org/mf_nested_anatomy_example/mf1"
+    assert str(r["target_type"]) == "http://purl.obolibrary.org/obo/EMAPA_17597"
+
+
+def test_plan_nested_anatomy_fixes_cc(builder):
+    """CC-led synthetic fixture: nested CL -part_of-> EMAPA re-pointed onto the
+    primary CC individual but KEEPS part_of (CC-led keeps the relation)."""
+    gocam_graph = builder.parse_ttl("resources/test/cc_nested_anatomy_example.ttl")
+    plan = builder.plan_nested_anatomy_fixes(gocam_graph)
+
+    assert len(plan) == 1
+    r = plan[0]
+    assert r["lead_aspect"] == "CC"
+    assert str(r["new_property_uri"]) == PART_OF, "CC-led keeps the original relation"
+    assert str(r["new_source_uri"]) == \
+        "http://model.geneontology.org/cc_nested_anatomy_example/cc1"
+    assert str(r["target_type"]) == "http://purl.obolibrary.org/obo/EMAPA_17597"

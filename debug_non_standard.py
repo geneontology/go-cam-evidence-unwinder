@@ -9,41 +9,9 @@ from gocam_unwinder.gocam_ttl import (
     GoCamGraphBuilder,
     collect_model_files,
     load_skip_filenames,
+    pick_lead_aspect,
+    find_nested_extensions,
 )
-
-# Lead-aspect priority order for picking the single bucket per annotation.
-# BP wins when present (the BP backbone subsumes MF in the design); CC is
-# next, MF is the fallback for annotations with only an MF backbone.
-ASPECT_PRIORITY = ("BP", "CC", "MF")
-
-
-def pick_lead_aspect(primary_terms):
-    """Return the lead aspect for an annotation, by priority BP > CC > MF, or None."""
-    for aspect in ASPECT_PRIORITY:
-        if aspect in primary_terms:
-            return aspect
-    return None
-
-
-def find_nested_extensions(annot, builder):
-    """Return (lead_aspect, nested_edges) for an annotation, or (None, []) if there
-    is no backbone or no nested extension.
-
-    A nested extension edge is an extension edge (per builder.get_extension_edges)
-    whose source_type is not in the lead aspect's primary GO term URI set.
-    """
-    primary_terms = builder.get_primary_go_terms(annot)
-    lead = pick_lead_aspect(primary_terms)
-    if lead is None:
-        return None, []
-    primary_uri_set = set(primary_terms[lead])
-    nested = [
-        edge for edge in builder.get_extension_edges(annot)
-        if edge.source_type not in primary_uri_set
-    ]
-    if not nested:
-        return lead, []
-    return lead, nested
 
 
 def classify_multiple_mf_bp(annot):

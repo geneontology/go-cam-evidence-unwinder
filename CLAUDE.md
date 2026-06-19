@@ -60,6 +60,11 @@ make target_$(date +%Y%m%d)/gpad_export_dev.gpad   # Steps 4a+5a: Dev GPAD
 make target_$(date +%Y%m%d)/gpad_export_prod.gpad  # Steps 4b+5b: Prod GPAD
 make target_$(date +%Y%m%d)/gpad_diff.txt          # Step 6: GPAD diff
 
+# Independent transformations of the source corpus (own output dirs, no conflict
+# with the split pipeline; run on their own)
+make non_std                                       # Remainders report (debug_non_standard.py)
+make fix_nested_anatomy                            # De-nest anatomy extensions -> target_YYYYMMDD/models_nested_fixed/
+
 # Clean up
 make clean      # Remove today's target directory
 make clean-all  # Remove all target_* directories
@@ -142,7 +147,21 @@ python src/gocam_unwinder/gocam_ttl.py \
   --report-file report.tsv \
   --criteria-fail-report failures.tsv \
   --date-change-report date_changes.tsv
+
+# Fix nested anatomy extensions (de-nest anatomy targets onto the primary term)
+# Writes only the models that were changed to --output-dir; --nested-fix-report is optional.
+# Independent of --split-evidence — combining the two in one invocation is a hard error
+# (the CLI exits with a message). Run them as separate passes / Makefile targets.
+python src/gocam_unwinder/gocam_ttl.py \
+  -d path/to/models/folder \
+  -o target/go_current.json \
+  -r target/ro_current.owl \
+  --fix-nested-anatomy \
+  --output-dir output/ \
+  --nested-fix-report nested_fixes.tsv
 ```
+
+**`--fix-nested-anatomy` mode:** For each annotation, finds extension edges where **both** endpoints are anatomical structures (anatomy ontologies or GO cellular components) and whose source is not the lead-aspect primary GO term (i.e. genuinely *nested*, such as `BP ─occurs_in→ CL ─part_of→ EMAPA`), and rewrites each so its source becomes the annotation's **primary individual** and its relation becomes `occurs_in` (MF/BP-led) or stays as-is (CC-led, typically `part_of`). Each qualifying edge is de-nested independently; intermediate direct extensions (e.g. `BP ─occurs_in→ CL`) are kept. Only models with at least one rewrite are written. The fix is idempotent (a second run is a no-op). `--nested-fix-report` columns: Model ID, Title, Lead Aspect, Primary Term, Old Source, Old Relation, Target, New Relation. This mode is an **independent** transformation of the source models: it reads the source corpus directly (not the split output) and is mutually exclusive with `--split-evidence` in a single invocation (combining them is a hard error). The Makefile exposes it as the standalone `fix_nested_anatomy` target, which writes to its own `$(TARGET_DIR)/models_nested_fixed` directory — so running it alongside the split pipeline never conflicts.
 
 ## Planning
 
@@ -174,6 +193,7 @@ When writing implementation plans, use the template at `docs/plans/PLAN-TEMPLATE
   - `get_evidence_metadata()`: Extracts metadata signature from evidence individuals for grouping
   - `group_evidence_by_metadata()`: Groups evidence across edges by identical metadata
   - `split_evidence_and_write_ttl()`: Splits multi-evidence annotations by evidence groups
+  - `rewrite_edge_source_and_relation(bnode_id, old_source, old_property, target, new_source, new_property)`: Low-level mutation that re-points an edge's source individual and relation, updating **both** the assertion triple and its reified `owl:Axiom` blank node (annotatedTarget, evidence, dates, contributors preserved; the axiom bnode is updated only if it exists). Used by the `--fix-nested-anatomy` mode to de-nest anatomy extensions onto the primary individual
 
 **StandardAnnotation** (`src/gocam_unwinder/gocam_ttl.py:43-68`)
 - Represents a connected component of edges forming a single annotation unit
@@ -219,7 +239,11 @@ When writing implementation plans, use the template at `docs/plans/PLAN-TEMPLATE
   - `print_non_standard_annotation_failed_checks()`: Outputs TSV report of failed checks with term labels
   - `_backbone_role()`: Returns the gene-product → MF/BP/CC backbone role of an edge (`"MF"` | `"BP"` | `"CC"` | `None`). MF = `enabled_by` with an MF source; BP = a relation in `self.mf_bp_valid_relations` (`part_of` ∪ the `acts_upstream_of_or_within` RO:0002264 family ∪ the `causally_upstream_of_or_within` RO:0002418 family) from a **root** MF (GO:0003674) to a BP; CC = `located_in`/`is_active_in` to a CC. The root-MF gate on the BP rule means a *specific* (non-root) MF `─part_of→` BP is an extension, not a BP backbone — so such annotations stay MF-led (the BP is contextual). Only the canonical "BP-only" pattern (unknown/root MF `part_of` **or** causally upstream of a BP) counts as a BP backbone. The relation set is shared with the #5 `invalid_mf_bp_relation` check so they cannot diverge; without an RO ontology it falls back to `part_of` only (the upstream/causal families require RO). Shared by `get_extension_edges()` and `get_primary_go_terms()`
   - `get_extension_edges()`: Returns the edges of a `StandardAnnotation` that are annotation extensions (i.e., `_backbone_role()` is `None`)
-  - `get_primary_go_terms()`: Returns a dict mapping aspect (`"MF"`/`"BP"`/`"CC"`) to the list of primary GO term URIs identified via `_backbone_role()` (MF→source_type, BP/CC→target_type). The remainders-report "lead aspect" is picked from these keys by priority BP > CC > MF (`pick_lead_aspect` in `debug_non_standard.py`), so the root-MF BP gate keeps specific-MF annotations MF-led
+  - `get_primary_go_terms()`: Returns a dict mapping aspect (`"MF"`/`"BP"`/`"CC"`) to the list of primary GO term URIs identified via `_backbone_role()` (MF→source_type, BP/CC→target_type). The remainders-report "lead aspect" is picked from these keys by priority BP > CC > MF (module-level `pick_lead_aspect`), so the root-MF BP gate keeps specific-MF annotations MF-led
+  - `get_primary_individuals()`: Mirror of `get_primary_go_terms()` that returns the primary *individual* URIs per aspect (MF→source_uri, BP/CC→target_uri) via the same `_backbone_role()` dispatch. The two methods are byte-for-byte parallel traversals, so for a given aspect their lists are index-aligned. Used by `plan_nested_anatomy_fixes()` to find which individual a nested edge re-points onto
+  - `plan_nested_anatomy_fixes(gocam)`: Builds the rewrite plan for the `--fix-nested-anatomy` mode. For every annotation (standard and non-standard), finds nested extension edges (`find_nested_extensions()`) whose source and target types are **both** anatomical structures (`_is_anatomical_structure()`), and emits one instruction dict per edge re-pointing it onto the lead aspect's primary individual. New relation is `occurs_in` (BFO:0000066) when the lead aspect is MF or BP, or the edge's existing relation (typically `part_of`) when CC. Annotations whose lead aspect has 0 or >1 primary individual are skipped with a warning. Instruction-dict keys: `model_id, title, lead_aspect, primary_term, bnode_id, old_source_uri, old_property_uri, target_uri, new_source_uri, new_property_uri, old_source_type, target_type`. Consumed by `GoCamGraph.rewrite_edge_source_and_relation()` in `main()`
+
+**Module-level helpers** (`src/gocam_unwinder/gocam_ttl.py`) — `ASPECT_PRIORITY = ("BP", "CC", "MF")`, `pick_lead_aspect(primary_terms)` (first aspect in `ASPECT_PRIORITY` present in the dict, or `None`), and `find_nested_extensions(annot, builder)` (returns `(lead_aspect, nested_edges)`, where `nested_edges` are extension edges whose `source_type` is not in the lead aspect's primary URI set). These were promoted from `debug_non_standard.py` (which now imports them) so both the `--fix-nested-anatomy` fixer and the remainders-report triage script share one definition.
 
 **`load_groups_lookup(groups_yaml_path)`** (`src/gocam_unwinder/gocam_ttl.py:65-88`)
 - Loads groups.yaml from go-site and creates a URI → label lookup dictionary
@@ -397,7 +421,7 @@ Tests use real GO-CAM model examples in `resources/test/`:
   - Used to test date-tolerant evidence grouping and date update during splitting
 - **5966411600000001.ttl**: Mouse stereocilium maintenance model with the `GO:0120045` BP annotation as a 5-edge subgraph
   - 2 backbone edges (`MF─enabled_by→GP`, `root-MF─part_of→BP` — the MF is the root term GO:0003674, so this is a true BP backbone) plus 3 extension edges including the chain `BP─occurs_in→CL─part_of→EMAPA`
-  - Used to test `get_extension_edges()` (backbone vs. extension classification across all three GO aspects)
+  - Used to test `get_extension_edges()` (backbone vs. extension classification across all three GO aspects), `get_primary_individuals()`, `rewrite_edge_source_and_relation()`, and the BP-led case of `plan_nested_anatomy_fixes()` — the nested `CL:0000202─part_of→EMAPA:17597` edge de-nests onto the primary BP individual (`...0004`) with `occurs_in`
 - **mf_occurs_in_anatomy_example.ttl**: Synthetic single-edge annotation `MF ─occurs_in→ WBbt:0006796` (anatomy) (Issue #22)
   - Regression fixture for `invalid_gp_mf_relation`: under the old `{GO, RO, BFO}` blocklist the anatomy target was misclassified as a GP and falsely flagged; the `GP_NAMESPACE_KEYS` allowlist now correctly ignores it
 - **mf_to_gp_has_input_output_example.ttl**: Synthetic model with two single-edge annotations, `MF ─has_input→ GP` and `MF ─has_output→ GP` (MGI gene products) (Issue #22)
@@ -421,6 +445,10 @@ Tests use real GO-CAM model examples in `resources/test/`:
   - Used to test `enabler_not_gp` check (#13): only the ChEBI-enabled edge is flagged
 - **MGI_MGI_2182965.ttl**: Mouse Tifa model with a single annotation whose backbone is a *specific* MF (`GO:0005515` protein binding) `─enabled_by→` the Tifa gene product, plus a `specific-MF ─part_of→ BP` (`GO:0043123`) edge
   - Used to test the root-MF gate on the BP backbone (`_backbone_role`): the specific MF keeps the annotation MF-led (lead aspect MF, not BP), so it buckets as `nested_mf_extensions` rather than `nested_bp_extensions` in the remainders report
+- **mf_nested_anatomy_example.ttl**: Synthetic MF-led model — `MF(GO:0004672)─enabled_by→GP`, `MF─occurs_in→CL:0000202` (direct extension), and the nested `CL:0000202─part_of→EMAPA:17597`
+  - Used to test the MF-led branch of `plan_nested_anatomy_fixes()`: the nested edge re-points onto the primary MF individual with `occurs_in`
+- **cc_nested_anatomy_example.ttl**: Synthetic CC-led model — `GP─located_in→CC(GO:0005634)`, `CC─part_of→CL:0000202` (direct extension), and the nested `CL:0000202─part_of→EMAPA:17597`
+  - Used to test the CC-led branch of `plan_nested_anatomy_fixes()`: the nested edge re-points onto the primary CC individual but **keeps** `part_of` (CC-led does not switch to `occurs_in`)
 
 The test requires the GO ontology file at `target/go_20250601.json` (downloaded via Makefile). The MF-causal->MF test also requires `resources/test/ro_20250723.owl`.
 
@@ -496,6 +524,11 @@ The test requires the GO ontology file at `target/go_20250601.json` (downloaded 
 - `test_multiple_mf_bp()`: Tests that both MF→BP edges in multi_mf_bp_example.ttl are flagged under `multiple_mf_bp` (the new key), and the old `multiple_mf_part_of` key is absent
 - `test_multiple_mf_anatomy()`: Tests that both MF→anatomy edges in multi_mf_anatomy_example.ttl are flagged under `multiple_mf_anatomy`
 - `test_enabler_not_gp()`: Tests that only the ChEBI-enabled edge in enabler_not_gp_example.ttl is flagged under `enabler_not_gp`
-- `test_mgi_2182965_lead_aspect_is_mf()`: Tests that MGI_MGI_2182965's single annotation has remainders-report lead aspect MF (not BP), via `pick_lead_aspect(builder.get_primary_go_terms(annot))` (imported from `debug_non_standard.py`). Regression for the root-MF BP gate: the specific MF (`GO:0005515`) `─part_of→` BP must not make BP win
+- `test_mgi_2182965_lead_aspect_is_mf()`: Tests that MGI_MGI_2182965's single annotation has remainders-report lead aspect MF (not BP), via `pick_lead_aspect(builder.get_primary_go_terms(annot))` (imported from `debug_non_standard.py`, which now re-exports it from `gocam_ttl.py`). Regression for the root-MF BP gate: the specific MF (`GO:0005515`) `─part_of→` BP must not make BP win
 - `test_mgi_2182965_specific_mf_part_of_bp_is_not_backbone()`: Tests that for MGI_MGI_2182965 `get_primary_go_terms()` returns only an `MF` key (primary `GO:0005515`, no `BP`) and that the specific-MF `─part_of→` BP edge appears in `get_extension_edges()` — confirming `_backbone_role()`'s root-MF gate classifies it as an extension
 - `test_causal_root_mf_to_bp_is_backbone()`: Tests that a `root-MF ─causally_upstream_of_or_within (RO:0002418)→ BP` edge (the passing causal edge in mf_bp_relation_example.ttl) is a BP backbone — `get_primary_go_terms()` registers the BP primary (`GO:0006954`) and the edge is not in `get_extension_edges()`. Confirms `_backbone_role()` accepts the full `mf_bp_valid_relations` set, not just `part_of`
+- `test_get_primary_individuals()`: Tests that `get_primary_individuals()` on 5966411600000001.ttl's GO:0120045 annotation returns `{"MF": [...0003], "BP": [...0004]}` (individual URIs, not types) and no `"CC"` key
+- `test_rewrite_edge_source_and_relation()`: Tests the low-level `GoCamGraph.rewrite_edge_source_and_relation()` on the `CL─part_of→EMAPA` edge in 5966411600000001.ttl: after re-pointing onto the BP individual (`...0004`) with `occurs_in`, the new assertion triple is present and the old gone, the `owl:Axiom` bnode's `annotatedSource`/`annotatedProperty` are swapped, and `annotatedTarget` + `lego:evidence` are preserved
+- `test_plan_nested_anatomy_fixes_bp()`: BP-led real fixture (5966411600000001.ttl) — `plan_nested_anatomy_fixes()` yields exactly one instruction: the `CL─part_of→EMAPA` edge re-pointed onto the primary BP individual (`...0004`) with `occurs_in`; the direct `BP─occurs_in→CL` extension is not in the plan
+- `test_plan_nested_anatomy_fixes_mf()`: MF-led synthetic fixture (mf_nested_anatomy_example.ttl) — the nested edge is re-pointed onto the primary MF individual with `occurs_in`
+- `test_plan_nested_anatomy_fixes_cc()`: CC-led synthetic fixture (cc_nested_anatomy_example.ttl) — the nested edge is re-pointed onto the primary CC individual but **keeps** `part_of`

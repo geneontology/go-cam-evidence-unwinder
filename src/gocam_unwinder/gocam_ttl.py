@@ -27,6 +27,9 @@ parser.add_argument('--skip-file', dest='skip_file', metavar='FILE',
                     help="Skip TTL files whose filename appears in FILE (one .ttl filename per line, e.g. true GO-CAM models to exclude)")
 parser.add_argument('--groups-yaml', help="Path to groups.yaml for resolving group URIs to labels")
 parser.add_argument('--date-change-report', help="Output TSV file for date change report (model ID, title, original/new dates, edge labels)")
+parser.add_argument('--fix-nested-anatomy', action='store_true',
+                    help="Rewrite nested anatomy extension edges to attach directly to the annotation's primary individual")
+parser.add_argument('--nested-fix-report', help="Output TSV file for the nested-anatomy fix report (one row per rewritten edge)")
 parser.add_argument('--no-label-api', action='store_true',
                     help="Disable OLS API fallback for resolving non-GO/RO term labels (enabled by default)")
 
@@ -123,6 +126,41 @@ def load_groups_lookup(groups_yaml_path: str) -> dict:
             lookup[group['id']] = group['label']
 
     return lookup
+
+
+# Lead-aspect priority order for picking a single aspect per annotation.
+# BP wins when present (the BP backbone subsumes MF in the design); CC is
+# next, MF is the fallback for annotations with only an MF backbone.
+ASPECT_PRIORITY = ("BP", "CC", "MF")
+
+
+def pick_lead_aspect(primary_terms):
+    """Return the lead aspect for an annotation, by priority BP > CC > MF, or None."""
+    for aspect in ASPECT_PRIORITY:
+        if aspect in primary_terms:
+            return aspect
+    return None
+
+
+def find_nested_extensions(annot, builder):
+    """Return (lead_aspect, nested_edges) for an annotation, or (None, []) if there
+    is no backbone or no nested extension.
+
+    A nested extension edge is an extension edge (per builder.get_extension_edges)
+    whose source_type is not in the lead aspect's primary GO term URI set.
+    """
+    primary_terms = builder.get_primary_go_terms(annot)
+    lead = pick_lead_aspect(primary_terms)
+    if lead is None:
+        return None, []
+    primary_uri_set = set(primary_terms[lead])
+    nested = [
+        edge for edge in builder.get_extension_edges(annot)
+        if edge.source_type not in primary_uri_set
+    ]
+    if not nested:
+        return lead, []
+    return lead, nested
 
 
 class StandardAnnotationEdge:
@@ -453,6 +491,32 @@ class GoCamGraph:
         # # Also clone the type
         # for obj in self.g.objects(old_individual_uri, rdflib.RDF.type):
         #     self.g.add((new_individual_uri, rdflib.RDF.type, obj))
+
+    def rewrite_edge_source_and_relation(self, bnode_id, old_source, old_property,
+                                         target, new_source, new_property):
+        """
+        Re-point an edge's source individual and relation, updating BOTH the
+        assertion triple and its reified owl:Axiom bnode.
+
+        Used to de-nest an anatomy extension: the nested edge
+        (old_source -old_property-> target) becomes
+        (new_source -new_property-> target), where new_source is the annotation's
+        primary individual. annotatedTarget, evidence, dates, and contributors on
+        the axiom bnode are left untouched. The axiom bnode is updated only if it
+        exists (defensive — a bare assertion may never have been reified).
+        """
+        # Assertion triple
+        self.g.remove((old_source, old_property, target))
+        self.g.add((new_source, new_property, target))
+
+        # Reified owl:Axiom bnode
+        bnode = rdflib.term.BNode(bnode_id)
+        if (bnode, rdflib.namespace.OWL.annotatedSource, old_source) in self.g:
+            self.g.remove((bnode, rdflib.namespace.OWL.annotatedSource, old_source))
+            self.g.add((bnode, rdflib.namespace.OWL.annotatedSource, new_source))
+        if (bnode, rdflib.namespace.OWL.annotatedProperty, old_property) in self.g:
+            self.g.remove((bnode, rdflib.namespace.OWL.annotatedProperty, old_property))
+            self.g.add((bnode, rdflib.namespace.OWL.annotatedProperty, new_property))
 
     def evidence_triples(self):
         evidence_rel = rdflib.URIRef("http://geneontology.org/lego/evidence")
@@ -1071,6 +1135,92 @@ class GoCamGraphBuilder:
 
         return primary
 
+    def get_primary_individuals(self, annot: StandardAnnotation) -> dict:
+        """
+        Return the primary *individual* URIs of an annotation, grouped by aspect.
+
+        Mirror of get_primary_go_terms, but collects the backbone individual URI
+        (not its type) per aspect, using the same _backbone_role dispatch:
+          - MF: source_uri of an MF -enabled_by-> GP edge
+          - BP: target_uri of a root-MF -part_of-> BP edge
+          - CC: target_uri of a   ? -located_in/is_active_in-> CC edge
+
+        Returns a dict mapping aspect ("MF", "BP", "CC") to a list of individual
+        URIs. Aspect keys are absent when no backbone match is found. Lists are
+        typically length 1 (longer surfaces anomalies, like get_primary_go_terms).
+        """
+        primary = {}
+        for edge in annot.edges.values():
+            role = self._backbone_role(edge)
+            if role == "MF":
+                # MF backbone -> primary MF individual is the source (the MF node)
+                primary.setdefault("MF", []).append(edge.source_uri)
+            elif role == "BP":
+                # BP backbone -> primary BP individual is the target
+                primary.setdefault("BP", []).append(edge.target_uri)
+            elif role == "CC":
+                # CC backbone -> primary CC individual is the target
+                primary.setdefault("CC", []).append(edge.target_uri)
+        return primary
+
+    def plan_nested_anatomy_fixes(self, gocam: GoCamGraph) -> list:
+        """
+        Build a list of rewrite instructions for nested anatomy extension edges.
+
+        For every annotation (standard and non-standard), find extension edges
+        whose source is not the lead-aspect primary term (nested) and whose source
+        and target types are both anatomical structures (_is_anatomical_structure),
+        and plan to re-point each onto the annotation's primary individual. The
+        relation becomes occurs_in for MF/BP-led annotations, or is kept as-is
+        (typically part_of) for CC-led annotations.
+
+        Annotations whose lead aspect has 0 or >1 primary individual are skipped
+        with a warning (ambiguous attach point).
+
+        Returns a list of instruction dicts with keys: model_id, title,
+        lead_aspect, primary_term, bnode_id, old_source_uri, old_property_uri,
+        target_uri, new_source_uri, new_property_uri, old_source_type, target_type.
+        """
+        plan = []
+        all_annots = gocam.standard_annotations + gocam.non_standard_annotations
+        for annot in all_annots:
+            lead, nested = find_nested_extensions(annot, self)
+            if not nested:
+                continue
+            primary_individuals = self.get_primary_individuals(annot).get(lead, [])
+            if len(primary_individuals) != 1:
+                print(f"WARNING: skipping annotation in {gocam.model_id} "
+                      f"({gocam.title}) — expected 1 primary {lead} individual, "
+                      f"found {len(primary_individuals)}")
+                continue
+            primary_individual = primary_individuals[0]
+            # `lead` came from find_nested_extensions -> pick_lead_aspect over
+            # get_primary_go_terms, so it is guaranteed to be a present key here.
+            primary_term = self.get_primary_go_terms(annot)[lead][0]
+            for edge in nested:
+                if not (self._is_anatomical_structure(edge.source_type)
+                        and self._is_anatomical_structure(edge.target_type)):
+                    continue
+                if lead in ("MF", "BP"):
+                    new_property = self.rel_occurs_in
+                else:
+                    new_property = edge.property_uri  # CC-led keeps the relation
+                plan.append({
+                    "model_id": gocam.model_id,
+                    "title": gocam.title,
+                    "lead_aspect": lead,
+                    "primary_term": primary_term,
+                    "bnode_id": edge.bnode_id,
+                    "old_source_uri": edge.source_uri,
+                    "old_property_uri": edge.property_uri,
+                    "target_uri": edge.target_uri,
+                    "new_source_uri": primary_individual,
+                    "new_property_uri": new_property,
+                    "old_source_type": edge.source_type,
+                    "target_type": edge.target_type,
+                })
+        return plan
+
     def parse_ttl(self, ttl_filename):
         gocam = GoCamGraph()
         gocam.g.parse(ttl_filename, format="ttl")
@@ -1351,6 +1501,17 @@ class GoCamGraphBuilder:
 if __name__ == "__main__":
     args = parser.parse_args()
 
+    # These are independent transformations of the source models and must not share
+    # one invocation: the fixer would run on the already-split in-memory graph (whose
+    # annotation objects were built pre-split) and overwrite the split output. Run them
+    # as separate passes instead (e.g. the `models_split` and `fix_nested_anatomy`
+    # Makefile targets, each with its own --output-dir). Checked before the (slow)
+    # ontology load so it fails fast.
+    if args.split_evidence and args.fix_nested_anatomy:
+        parser.error("--split-evidence and --fix-nested-anatomy cannot be combined in "
+                     "one invocation; run them as separate passes with separate "
+                     "--output-dir directories.")
+
     # Load model ID list if provided
     model_id_filter = None
     if args.pathway_id_list:
@@ -1394,10 +1555,11 @@ if __name__ == "__main__":
         crit_fail_report_headers = ["Model ID", "Title", "Reason", "Source", "Predicate", "Object"]
         print("\t".join(crit_fail_report_headers), file=criteria_fail_output)
 
-    if args.split_evidence and args.output_dir:
+    if (args.split_evidence or args.fix_nested_anatomy) and args.output_dir:
         os.makedirs(args.output_dir, exist_ok=True)
 
     all_date_change_records = []
+    all_nested_fix_records = []
 
     for f in model_files:
         gocam_graph = go_cam_graph_builder.parse_ttl(f)
@@ -1481,6 +1643,22 @@ if __name__ == "__main__":
             all_date_change_records.extend(date_records)
             print(f"Split evidence for {filename} -> {output_filename}")
 
+        # Fix nested anatomy extensions if requested (independent of --split-evidence)
+        if args.fix_nested_anatomy:
+            nested_plan = go_cam_graph_builder.plan_nested_anatomy_fixes(gocam_graph)
+            if nested_plan:
+                for rec in nested_plan:
+                    gocam_graph.rewrite_edge_source_and_relation(
+                        rec["bnode_id"], rec["old_source_uri"], rec["old_property_uri"],
+                        rec["target_uri"], rec["new_source_uri"], rec["new_property_uri"])
+                all_nested_fix_records.extend(nested_plan)
+                if args.output_dir:
+                    fix_output_filename = os.path.join(args.output_dir, filename)
+                else:
+                    fix_output_filename = os.path.splitext(f)[0] + "_nested_fixed.ttl"
+                gocam_graph.write_ttl(fix_output_filename)
+                print(f"Fixed nested anatomy for {filename} -> {fix_output_filename} ({len(nested_plan)} edges)")
+
     # Write date change report if requested
     if args.date_change_report and all_date_change_records:
         with open(args.date_change_report, 'w') as dcr_file:
@@ -1493,6 +1671,22 @@ if __name__ == "__main__":
                 cols = [rec["model_id"], rec["title"], rec["original_date"], rec["new_date"],
                         source_label, pred_label, target_label]
                 print("\t".join(cols), file=dcr_file)
+
+    # Write nested-anatomy fix report if requested
+    if args.nested_fix_report and all_nested_fix_records:
+        with open(args.nested_fix_report, 'w') as nfr_file:
+            nfr_headers = ["Model ID", "Title", "Lead Aspect", "Primary Term",
+                           "Old Source", "Old Relation", "Target", "New Relation"]
+            print("\t".join(nfr_headers), file=nfr_file)
+            for rec in all_nested_fix_records:
+                primary_label = go_cam_graph_builder.term_label(rec["primary_term"]) if rec["primary_term"] else ""
+                old_source_label = go_cam_graph_builder.term_label(rec["old_source_type"]) if rec["old_source_type"] else ""
+                old_rel_label = go_cam_graph_builder.term_label(rec["old_property_uri"]) if rec["old_property_uri"] else ""
+                target_label = go_cam_graph_builder.term_label(rec["target_type"]) if rec["target_type"] else ""
+                new_rel_label = go_cam_graph_builder.term_label(rec["new_property_uri"]) if rec["new_property_uri"] else ""
+                cols = [rec["model_id"], rec["title"], rec["lead_aspect"], primary_label,
+                        old_source_label, old_rel_label, target_label, new_rel_label]
+                print("\t".join(cols), file=nfr_file)
 
     # Close report file if it was opened
     if report_file:

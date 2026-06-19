@@ -39,12 +39,15 @@ CRITERIA_FAIL_REPORT := $(TARGET_DIR)/models_split_criteria_failures_$(DATE).tsv
 DATE_CHANGE_REPORT := $(TARGET_DIR)/date_changes_$(DATE).tsv
 NON_STD_REPORT := $(TARGET_DIR)/remainders_report_$(DATE).tsv
 NON_STD_LOG := $(TARGET_DIR)/remainders_report_$(DATE).log
+MODELS_NESTED_FIXED := $(TARGET_DIR)/models_nested_fixed
+NESTED_FIX_REPORT := $(TARGET_DIR)/nested_fixes_$(DATE).tsv
+NESTED_FIX_LOG := $(TARGET_DIR)/nested_fixes_$(DATE).log
 
 # Google Drive folder for published report sheets (override on the CLI if needed)
 GDRIVE_FOLDER_ID ?= 1ORulffGbEQANu8-jViGJaFn-mPMpQRfs
 
 # Default target
-.PHONY: all test clean pipeline
+.PHONY: all test clean pipeline fix_nested_anatomy
 all: pipeline
 
 # Run tests
@@ -181,6 +184,33 @@ $(NON_STD_REPORT): $(GO_ONTOLOGY) $(RO_ONTOLOGY) $(GROUPS_YAML)
 
 .PHONY: non_std
 non_std: $(NON_STD_REPORT)
+
+# Fix nested anatomy extensions: de-nest anatomy targets onto the annotation's
+# primary term. This is an INDEPENDENT transformation of the source models -- it
+# reads $(MODELS_DIR) directly (not the split output) and writes only the changed
+# models to its own output dir, so it never conflicts with `models_split`. The CLI
+# forbids combining --fix-nested-anatomy with --split-evidence in one invocation;
+# run this target separately from the split pipeline.
+$(MODELS_NESTED_FIXED): $(GO_ONTOLOGY) $(RO_ONTOLOGY) $(GROUPS_YAML)
+	mkdir -p $(MODELS_NESTED_FIXED)
+	set -o pipefail; python3 src/gocam_unwinder/gocam_ttl.py \
+		-d $(MODELS_DIR) \
+		-o $(GO_ONTOLOGY) \
+		-r $(RO_ONTOLOGY) \
+		--groups-yaml $(GROUPS_YAML) \
+		--skip-prefix SYNGO \
+		--skip-prefix R-HSA \
+		--skip-prefix YeastPathways \
+		$(if $(SKIP_LIST),--skip-file $(SKIP_LIST),) \
+		--fix-nested-anatomy \
+		--output-dir $(MODELS_NESTED_FIXED) \
+		--nested-fix-report $(NESTED_FIX_REPORT) \
+		| tee $(NESTED_FIX_LOG)
+	touch $@
+
+.PHONY: fix_nested_anatomy
+fix_nested_anatomy: $(MODELS_NESTED_FIXED)
+	@echo "Nested anatomy fixes written to $(MODELS_NESTED_FIXED)/ (report: $(NESTED_FIX_REPORT))"
 
 # Publish whichever of the three reports exist in $(TARGET_DIR) to Google Drive as
 # Sheets via tsv2sheet. Push-only: does not build the reports. Missing reports are
