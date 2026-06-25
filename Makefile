@@ -228,7 +228,8 @@ push-reports:
 	}; \
 	push "$(REPORT_FILE)" "Standard annotation model stats $(DATE)"; \
 	push "$(CRITERIA_FAIL_REPORT)" "Standard annotation criteria failures $(DATE)"; \
-	push "$(NON_STD_REPORT)" "Non-standard annotation remainders $(DATE)"
+	push "$(NON_STD_REPORT)" "Non-standard annotation remainders $(DATE)"; \
+	push "$(NESTED_FIX_REPORT)" "Nested anatomical extensions fixed $(DATE)"
 
 # Clean up generated files
 clean:

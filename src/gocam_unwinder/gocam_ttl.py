@@ -9,7 +9,8 @@ import yaml
 from ontobio.rdfgen import relations
 from rdflib import URIRef
 from prefixcommons import curie_util
-from typing import List
+from typing import List, Optional
+from dataclasses import dataclass, field
 
 parser = argparse.ArgumentParser()
 parser.add_argument('-m', '--model_filename', help="Single GO-CAM model file to process")
@@ -161,6 +162,99 @@ def find_nested_extensions(annot, builder):
     if not nested:
         return lead, []
     return lead, nested
+
+
+# Canonical order of all standard-annotation failure-check names. Fixed so the
+# extended stats report has stable columns even when a model has zero of a given
+# failure. Mirrors the checks recorded by filter_out_non_std_annotations.
+CHECK_NAMES = (
+    "inconsistent_evidence",
+    "multiple_mf_bp",
+    "mf_causal_mf",
+    "edge_without_evidence",
+    "invalid_gp_mf_relation",
+    "invalid_gp_cc_relation",
+    "invalid_gp_bp_relation",
+    "invalid_mf_bp_relation",
+    "invalid_mf_cc_relation",
+    "invalid_bp_cc_relation",
+    "multiple_mf_anatomy",
+    "enabler_not_gp",
+    "no_gp_at_all",
+)
+
+# The only checks a both-anatomical nested extension edge can contribute to: a
+# relation-validity check never fires on an anatomy->anatomy edge (no rule has an
+# anatomy source category), so de-nesting accounts for the whole of a
+# non-standard annotation's failures only when every failing check is one of
+# these. Defines a "fixable" non-standard annotation in compute_model_stats.
+NESTING_ATTRIBUTABLE_CHECKS = frozenset({
+    "inconsistent_evidence",
+    "edge_without_evidence",
+})
+
+
+@dataclass
+class ModelStats:
+    """Per-model statistics. Base fields reproduce the --report-file columns
+    exactly; extended fields back the debug_non_standard.py stats report.
+
+    Exception: std_multi_evidence_count is an internal driving field (it gates
+    --split-evidence), not a report column, so it is not emitted by to_base_row.
+    """
+
+    # --- base fields (today's --report-file columns) ---
+    model_id: str                        # exact "Model ID" cell (caller-supplied)
+    title: str
+    standard_count: int
+    non_standard_count: int
+    multi_evidence_count: int            # std + non-std
+    mixed_annotation_type: bool
+    mf_causal_edge_count: int            # "MF-causal->MF Edges" (EDGE count)
+    no_evidence_edge_count: int
+    modelstate: Optional[str]
+    groups: List[str]                    # already resolved to labels
+    multi_evidence_go_terms: List[str]   # sorted, resolved labels
+    std_multi_evidence_count: int        # std-only; drives the --split decision
+
+    # --- extended fields (debug stats report only) ---
+    nested_mf_count: int = 0
+    nested_bp_count: int = 0
+    nested_cc_count: int = 0
+    fixable_standard_count: int = 0
+    fixable_nonstandard_count: int = 0
+    failure_counts: dict = field(default_factory=lambda: {n: 0 for n in CHECK_NAMES})
+
+    BASE_HEADERS = ["Model ID", "Title", "Standard Annotations",
+        "Non-Standard Annotations", "Multi-Evidence Annotations",
+        "Mixed Annotation Type", "MF-causal->MF Edges", "Edges w/o Evidence",
+        "Model State", "Groups", "Multi-Evidence GO Terms"]
+
+    @classmethod
+    def base_header(cls):
+        return list(cls.BASE_HEADERS)
+
+    def to_base_row(self):
+        return [self.model_id, self.title, str(self.standard_count),
+            str(self.non_standard_count), str(self.multi_evidence_count),
+            "Yes" if self.mixed_annotation_type else "No",
+            str(self.mf_causal_edge_count), str(self.no_evidence_edge_count),
+            self.modelstate or "", "|".join(self.groups),
+            "|".join(self.multi_evidence_go_terms)]
+
+    @classmethod
+    def extended_header(cls):
+        return cls.base_header() + [
+            "Nested MF Extensions", "Nested BP Extensions", "Nested CC Extensions",
+            "Fixable (Standard)", "Fixable (Non-Standard)",
+        ] + [f"fail:{n}" for n in CHECK_NAMES]
+
+    def to_extended_row(self):
+        return self.to_base_row() + [
+            str(self.nested_mf_count), str(self.nested_bp_count),
+            str(self.nested_cc_count), str(self.fixable_standard_count),
+            str(self.fixable_nonstandard_count),
+        ] + [str(self.failure_counts[n]) for n in CHECK_NAMES]
 
 
 class StandardAnnotationEdge:
@@ -1163,7 +1257,7 @@ class GoCamGraphBuilder:
                 primary.setdefault("CC", []).append(edge.target_uri)
         return primary
 
-    def plan_nested_anatomy_fixes(self, gocam: GoCamGraph) -> list:
+    def plan_nested_anatomy_fixes(self, gocam: GoCamGraph, warn: bool = True) -> list:
         """
         Build a list of rewrite instructions for nested anatomy extension edges.
 
@@ -1189,9 +1283,10 @@ class GoCamGraphBuilder:
                 continue
             primary_individuals = self.get_primary_individuals(annot).get(lead, [])
             if len(primary_individuals) != 1:
-                print(f"WARNING: skipping annotation in {gocam.model_id} "
-                      f"({gocam.title}) — expected 1 primary {lead} individual, "
-                      f"found {len(primary_individuals)}")
+                if warn:
+                    print(f"WARNING: skipping annotation in {gocam.model_id} "
+                          f"({gocam.title}) — expected 1 primary {lead} individual, "
+                          f"found {len(primary_individuals)}")
                 continue
             primary_individual = primary_individuals[0]
             # `lead` came from find_nested_extensions -> pick_lead_aspect over
@@ -1220,6 +1315,86 @@ class GoCamGraphBuilder:
                     "target_type": edge.target_type,
                 })
         return plan
+
+    def compute_model_stats(self, gocam: GoCamGraph, model_id: str,
+                            extended: bool = False) -> ModelStats:
+        """
+        Compute per-model statistics (no I/O). `model_id` is the exact "Model ID"
+        cell the caller wants (e.g. "gomodel:" + filename stem). When `extended`
+        is True, also compute the triage fields (nested buckets, per-check failure
+        counts, fixable counts) used by the debug stats report.
+        """
+        std = gocam.standard_annotations
+        nonstd = gocam.non_standard_annotations
+        all_annots = std + nonstd
+
+        std_multi = sum(1 for a in std if a.has_muliple_evidence())
+        multi_ev_terms = set()
+        for a in std:
+            if a.has_muliple_evidence():
+                for edge in a.edges.values():
+                    for t in (edge.source_type, edge.target_type):
+                        if t:
+                            label = self.term_label(t)
+                            # skip URIs and CURIEs (keep only resolved labels)
+                            if label and not label.startswith("http") and ":" not in label:
+                                multi_ev_terms.add(label)
+        nonstd_multi = sum(1 for a in nonstd if a.has_muliple_evidence())
+        mf_causal_edges = sum(len(a.failed_checks.get("mf_causal_mf", set()))
+                              for a in nonstd)
+        no_ev_edges = sum(1 for a in all_annots
+                          for e in a.edges.values() if not e.evidence_uris)
+
+        stats = ModelStats(
+            model_id=model_id,
+            title=gocam.title,
+            standard_count=len(std),
+            non_standard_count=len(nonstd),
+            multi_evidence_count=std_multi + nonstd_multi,
+            mixed_annotation_type=bool(std) and bool(nonstd),
+            mf_causal_edge_count=mf_causal_edges,
+            no_evidence_edge_count=no_ev_edges,
+            modelstate=gocam.modelstate,
+            groups=list(gocam.groups or []),
+            multi_evidence_go_terms=sorted(multi_ev_terms),
+            std_multi_evidence_count=std_multi,
+        )
+        if not extended:
+            return stats
+
+        # per-check annotation-level counts (number of annotations with >=1
+        # failure of each check)
+        for a in all_annots:
+            for name in a.failed_checks:
+                if name in stats.failure_counts:
+                    stats.failure_counts[name] += 1
+
+        # nested-extension bucket counts, by lead aspect (BP > CC > MF)
+        nested = {"MF": 0, "BP": 0, "CC": 0}
+        for a in all_annots:
+            lead, nested_edges = find_nested_extensions(a, self)
+            if nested_edges:
+                nested[lead] += 1
+        stats.nested_mf_count = nested["MF"]
+        stats.nested_bp_count = nested["BP"]
+        stats.nested_cc_count = nested["CC"]
+
+        # fixable counts — reuse the real planner so this can't diverge from the
+        # fixer. An annotation is a "fixer target" iff the planner would rewrite
+        # one of its edges (bnode-id membership). Standard targets are fixable;
+        # non-standard targets are fixable only when every failing check is
+        # attributable to the nesting (NESTING_ATTRIBUTABLE_CHECKS).
+        fixer_bnodes = {r["bnode_id"]
+                        for r in self.plan_nested_anatomy_fixes(gocam, warn=False)}
+        for a in all_annots:
+            if not any(bnid in fixer_bnodes for bnid in a.edges):
+                continue
+            if not a.failed_checks:
+                stats.fixable_standard_count += 1
+            elif set(a.failed_checks) <= NESTING_ATTRIBUTABLE_CHECKS:
+                stats.fixable_nonstandard_count += 1
+
+        return stats
 
     def parse_ttl(self, ttl_filename):
         gocam = GoCamGraph()
@@ -1360,6 +1535,19 @@ class GoCamGraphBuilder:
                         if prop not in rule["valid"]:
                             failed_checks.setdefault(rule["key"], set()).add(edge.bnode_id)
                         break
+
+            # Check #14: the annotation subgraph must contain at least one gene
+            # product. A standard annotation links a GP to GO; a subgraph with no
+            # GP at all (e.g. a bare anatomy/chemical placement) is non-standard.
+            # All edges are recorded (annotation-level failure). std_annot always
+            # has >= 1 edge -- it is created only when an edge is added.
+            has_gp = any(
+                self._gene_product_namespace_key(t) in self.GP_NAMESPACE_KEYS
+                for edge in std_annot.edges.values()
+                for t in (edge.source_type, edge.target_type)
+            )
+            if not has_gp:
+                failed_checks["no_gp_at_all"] = set(std_annot.edges.keys())
 
             std_annot.failed_checks = failed_checks
 
@@ -1544,8 +1732,7 @@ if __name__ == "__main__":
         output = sys.stdout
 
     # Always print statistics header
-    headers = ["Model ID", "Title", "Standard Annotations", "Non-Standard Annotations", "Multi-Evidence Annotations", "Mixed Annotation Type", "MF-causal->MF Edges", "Edges w/o Evidence", "Model State", "Groups", "Multi-Evidence GO Terms"]
-    print("\t".join(headers), file=output)
+    print("\t".join(ModelStats.base_header()), file=output)
 
     fail_report_file = None
     criteria_fail_output = None
@@ -1571,67 +1758,19 @@ if __name__ == "__main__":
         filename = os.path.basename(f)
         model_id = filename.split(".")[0]
 
-        # Print statistics
-        mixed_annotation_type = "No"
-        if gocam_graph.standard_annotations and gocam_graph.non_standard_annotations:
-            mixed_annotation_type = "Yes"
-
-        # Count annotations with multiple evidence on at least one edge
-        # Also collect GO term labels for terms in multi-evidence annotations
-        std_multi_evidence_count = 0
-        multi_evidence_go_terms = set()
-        for std_annot in gocam_graph.standard_annotations:
-            if std_annot.has_muliple_evidence():
-                std_multi_evidence_count += 1
-                # Collect GO term labels from all edges in this annotation
-                # Skip URIs and CURIEs (only include resolved human-readable labels)
-                for edge in std_annot.edges.values():
-                    if edge.source_type:
-                        label = go_cam_graph_builder.term_label(edge.source_type)
-                        # Skip if URI, CURIE (contains ':'), or empty
-                        if label and not label.startswith("http") and ":" not in label:
-                            multi_evidence_go_terms.add(label)
-                    if edge.target_type:
-                        label = go_cam_graph_builder.term_label(edge.target_type)
-                        if label and not label.startswith("http") and ":" not in label:
-                            multi_evidence_go_terms.add(label)
-
-        # Also compute multi_evidence_count for non-standard annotations
-        non_std_multi_evidence_count = 0
-        for non_std_annot in gocam_graph.non_standard_annotations:
-            if non_std_annot.has_muliple_evidence():
-                non_std_multi_evidence_count += 1
-
-        # This is what goes in the Multi-Evidence Annotations column
-        report_multi_evidence_count = std_multi_evidence_count + non_std_multi_evidence_count
-
-        # Count MF causal edges in non-standard annotations
-        mf_causal_count = 0
-        for non_std_annot in gocam_graph.non_standard_annotations:
-            for causal_bnode_id in non_std_annot.failed_checks.get("mf_causal_mf", set()):
-                mf_causal_count += 1
-
-        # Count edges without evidence across all annotations
-        no_evidence_edge_count = 0
-        all_annotations = gocam_graph.standard_annotations + gocam_graph.non_standard_annotations
-        for annot in all_annotations:
-            for edge in annot.edges.values():
-                if len(edge.evidence_uris) == 0:
-                    no_evidence_edge_count += 1
+        # Compute per-model statistics (base fields only for the frozen report)
+        stats = go_cam_graph_builder.compute_model_stats(
+            gocam_graph, "gomodel:" + model_id)
 
         if criteria_fail_output:
             # print standard annotation fail_checks by edge
-            go_cam_graph_builder.print_non_standard_annotation_failed_checks(gocam_graph, report_file=criteria_fail_output)
+            go_cam_graph_builder.print_non_standard_annotation_failed_checks(
+                gocam_graph, report_file=criteria_fail_output)
 
-        # Format multi-evidence GO terms as pipe-separated list
-        multi_ev_terms_str = "|".join(sorted(multi_evidence_go_terms)) if multi_evidence_go_terms else ""
-        # Format groups as pipe-separated list
-        groups_str = "|".join(gocam_graph.groups) if gocam_graph.groups else ""
-        modelstate_str = gocam_graph.modelstate or ""
-        print("\t".join(["gomodel:"+model_id, gocam_graph.title, str(len(gocam_graph.standard_annotations)), str(len(gocam_graph.non_standard_annotations)), str(report_multi_evidence_count), mixed_annotation_type, str(mf_causal_count), str(no_evidence_edge_count), modelstate_str, groups_str, multi_ev_terms_str]), file=output)
+        print("\t".join(stats.to_base_row()), file=output)
 
         # Split evidence if requested and model contains standard annotations having multiple evidence edges
-        if args.split_evidence and std_multi_evidence_count >= 1:
+        if args.split_evidence and stats.std_multi_evidence_count >= 1:
             if args.output_dir:
                 output_filename = os.path.join(args.output_dir, filename)
             else:

@@ -344,6 +344,10 @@ Each `StandardAnnotation` has a `failed_checks` attribute:
     - The target of an `enabled_by` edge (MF→enabler) must be a gene product (in `GP_NAMESPACE_KEYS`). Flags annotations where the enabler is a non-GP entity such as a GO term or ChEBI chemical.
     - When failed, the offending `enabled_by` edge is recorded
 
+13. **No gene product in subgraph** (`no_gp_at_all`):
+    - Flags annotations whose subgraph contains no gene product — no individual whose type resolves to a `GP_NAMESPACE_KEYS` namespace via `_gene_product_namespace_key()` (scanning every edge's `source_type`/`target_type`). A standard annotation links a gene product to GO; a subgraph that is, e.g., a bare anatomy or chemical placement has no GP and is non-standard. Complements `enabler_not_gp`/`invalid_gp_mf_relation`, which only fire on edges that already touch a GP-shaped or `enabled_by` endpoint.
+    - When failed, **all** edges of the annotation are recorded (annotation-level failure, like `inconsistent_evidence`).
+
 **Backbone-only gate:** The relation-validity checks 6–10 above (`invalid_gp_cc_relation`, `invalid_gp_bp_relation`, `invalid_mf_bp_relation`, `invalid_mf_cc_relation`, `invalid_bp_cc_relation`) validate the annotation **backbone** only. An edge is validated only if its relation is in `GoCamGraphBuilder.backbone_relations` — the recognized backbone/placement relations (`located_in`, `is_active_in`, `occurs_in`, `part_of`, plus the `acts_upstream_of_or_within` RO:0002264 and `causally_upstream_of_or_within` RO:0002418 families). Edges using any other relation are annotation **extensions** (e.g. `BP ─results_in_development_of→ anatomy`) and are left informational, not flagged. A *misused* placement relation (e.g. `located_in` on a `BP→CC` edge) is in `backbone_relations` and is still flagged. `occurs_in` is a recognized placement relation, so a `root-MF ─occurs_in→ CC` edge is validated by `invalid_mf_cc_relation` (the MF→CC placement must be `is_active_in`).
 
 **Note:** TSV rules #7, #8, #9 from `std_annot_rules.tsv` are informational only — they produce no `failed_checks` entry and do not affect standard/non-standard classification.

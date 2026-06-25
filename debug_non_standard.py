@@ -2,11 +2,13 @@
 """Debug script: iterate over non-standard annotations in a directory of GO-CAM TTLs."""
 
 import argparse
+import os
 
 import rdflib
 
 from gocam_unwinder.gocam_ttl import (
     GoCamGraphBuilder,
+    ModelStats,
     collect_model_files,
     load_skip_filenames,
     pick_lead_aspect,
@@ -88,6 +90,7 @@ def main():
     ap.add_argument("--skip-file", dest="skip_file",
                     help="Skip TTL files whose filename appears in FILE (one .ttl filename per line, e.g. true GO-CAM models to exclude)")
     ap.add_argument("--tsv-output", help="TSV output file for bucketed annotation report")
+    ap.add_argument("--stats-output", help="TSV output file for per-model statistics (extended columns)")
     ap.add_argument("--no-label-api", action="store_true",
                     help="Disable OLS API fallback for resolving non-GO/RO term labels (enabled by default)")
     args = ap.parse_args()
@@ -120,6 +123,7 @@ def main():
 
     # TSV rows: (model_id, title, bucket, source, predicate, target, eco_codes, groups)
     tsv_rows = []
+    all_stats = []
 
     total_non_std = 0
 
@@ -128,6 +132,9 @@ def main():
 
         if gocam.modelstate == "delete":
             continue
+
+        model_id = "gomodel:" + os.path.basename(ttl_path).split(".")[0]
+        all_stats.append(builder.compute_model_stats(gocam, model_id, extended=True))
 
         groups = "|".join(gocam.groups) if gocam.groups else ""
 
@@ -229,6 +236,14 @@ def main():
             for row in tsv_rows:
                 f.write("\t".join(str(v) for v in row) + "\n")
         print(f"\nTSV report written to {args.tsv_output} ({len(tsv_rows)} rows)")
+
+    # Write extended per-model stats report
+    if args.stats_output:
+        with open(args.stats_output, "w") as f:
+            f.write("\t".join(ModelStats.extended_header()) + "\n")
+            for s in all_stats:
+                f.write("\t".join(s.to_extended_row()) + "\n")
+        print(f"\nStats report written to {args.stats_output} ({len(all_stats)} models)")
 
 
 if __name__ == "__main__":

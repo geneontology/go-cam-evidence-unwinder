@@ -1617,3 +1617,207 @@ def test_plan_nested_anatomy_fixes_cc(builder):
     assert str(r["new_source_uri"]) == \
         "http://model.geneontology.org/cc_nested_anatomy_example/cc1"
     assert str(r["target_type"]) == "http://purl.obolibrary.org/obo/EMAPA_17597"
+
+
+def test_plan_nested_anatomy_fixes_warn_param(builder):
+    """plan_nested_anatomy_fixes accepts warn=False and returns the same plan
+    as the default call (the flag only gates warning output, not results)."""
+    gocam_graph = builder.parse_ttl("resources/test/5966411600000001.ttl")
+    default_plan = builder.plan_nested_anatomy_fixes(gocam_graph)
+    quiet_plan = builder.plan_nested_anatomy_fixes(gocam_graph, warn=False)
+    assert [r["bnode_id"] for r in quiet_plan] == [r["bnode_id"] for r in default_plan]
+    assert len(quiet_plan) == 1
+
+
+def test_model_stats_base_header():
+    """base_header() is exactly today's 11-column --report-file header."""
+    from gocam_unwinder.gocam_ttl import ModelStats
+    assert ModelStats.base_header() == [
+        "Model ID", "Title", "Standard Annotations", "Non-Standard Annotations",
+        "Multi-Evidence Annotations", "Mixed Annotation Type", "MF-causal->MF Edges",
+        "Edges w/o Evidence", "Model State", "Groups", "Multi-Evidence GO Terms"]
+
+
+def test_model_stats_base_row_formatting():
+    """to_base_row() renders bool/list/str fields exactly as the legacy block did."""
+    from gocam_unwinder.gocam_ttl import ModelStats
+    s = ModelStats(
+        model_id="gomodel:X", title="T", standard_count=2, non_standard_count=1,
+        multi_evidence_count=3, mixed_annotation_type=True, mf_causal_edge_count=0,
+        no_evidence_edge_count=1, modelstate="production", groups=["MGI", "SGD"],
+        multi_evidence_go_terms=["alpha", "beta"], std_multi_evidence_count=2)
+    assert s.to_base_row() == [
+        "gomodel:X", "T", "2", "1", "3", "Yes", "0", "1", "production",
+        "MGI|SGD", "alpha|beta"]
+
+
+def test_model_stats_base_row_empties():
+    """Empty groups/terms render as '' and a None modelstate as ''; mixed False -> 'No'."""
+    from gocam_unwinder.gocam_ttl import ModelStats
+    s = ModelStats(
+        model_id="gomodel:Y", title="T2", standard_count=0, non_standard_count=0,
+        multi_evidence_count=0, mixed_annotation_type=False, mf_causal_edge_count=0,
+        no_evidence_edge_count=0, modelstate=None, groups=[],
+        multi_evidence_go_terms=[], std_multi_evidence_count=0)
+    row = s.to_base_row()
+    assert row[5] == "No" and row[8] == "" and row[9] == "" and row[10] == ""
+
+
+def test_model_stats_extended_header():
+    """extended_header() = base + 5 triage columns + one fail:<name> per CHECK_NAMES."""
+    from gocam_unwinder.gocam_ttl import ModelStats, CHECK_NAMES
+    hdr = ModelStats.extended_header()
+    assert hdr[:11] == ModelStats.base_header()
+    assert hdr[11:16] == ["Nested MF Extensions", "Nested BP Extensions",
+                          "Nested CC Extensions", "Fixable (Standard)",
+                          "Fixable (Non-Standard)"]
+    assert hdr[16:] == [f"fail:{n}" for n in CHECK_NAMES]
+    assert len(hdr) == 16 + len(CHECK_NAMES)
+
+
+def test_model_stats_extended_row_failcounts_order():
+    """to_extended_row() emits failure_counts in CHECK_NAMES order, 0 where absent."""
+    from gocam_unwinder.gocam_ttl import ModelStats, CHECK_NAMES
+    s = ModelStats(
+        model_id="gomodel:Z", title="T3", standard_count=1, non_standard_count=1,
+        multi_evidence_count=0, mixed_annotation_type=True, mf_causal_edge_count=0,
+        no_evidence_edge_count=0, modelstate="production", groups=[],
+        multi_evidence_go_terms=[], std_multi_evidence_count=0,
+        nested_mf_count=1, nested_bp_count=2, nested_cc_count=3,
+        fixable_standard_count=4, fixable_nonstandard_count=5)
+    s.failure_counts["edge_without_evidence"] = 7
+    row = s.to_extended_row()
+    assert row[11:16] == ["1", "2", "3", "4", "5"]
+    idx = 16 + CHECK_NAMES.index("edge_without_evidence")
+    assert row[idx] == "7"
+    # every other check column is "0"
+    assert sum(1 for c in row[16:] if c == "0") == len(CHECK_NAMES) - 1
+
+
+def test_nesting_attributable_checks_subset_of_check_names():
+    """Every NESTING_ATTRIBUTABLE_CHECKS member must be a valid CHECK_NAMES entry."""
+    from gocam_unwinder.gocam_ttl import CHECK_NAMES, NESTING_ATTRIBUTABLE_CHECKS
+    assert NESTING_ATTRIBUTABLE_CHECKS <= set(CHECK_NAMES)
+
+
+def test_compute_model_stats_base(builder):
+    """compute_model_stats reproduces the documented base fields for
+    MGI_MGI_1100089 (28 standard annotations; a multi-evidence positive case)."""
+    gocam_graph = builder.parse_ttl("resources/test/MGI_MGI_1100089.ttl")
+    stats = builder.compute_model_stats(gocam_graph, "gomodel:MGI_MGI_1100089")
+
+    assert stats.standard_count == 28
+    assert stats.std_multi_evidence_count >= 1          # positive multi-evidence model
+    row = stats.to_base_row()
+    assert len(row) == 11
+    assert row[0] == "gomodel:MGI_MGI_1100089"
+    assert row[2] == "28"
+    # extended fields untouched on a base (extended=False) call
+    assert stats.nested_bp_count == 0 and stats.fixable_standard_count == 0
+
+
+def test_compute_model_stats_nested_buckets(builder):
+    """On 5966411600000001.ttl the GO:0120045 annotation is BP-led with a nested
+    anatomy edge -> nested_bp_count == 1, MF/CC == 0 (matches the debug script)."""
+    gocam_graph = builder.parse_ttl("resources/test/5966411600000001.ttl")
+    stats = builder.compute_model_stats(gocam_graph, "gomodel:x", extended=True)
+    assert stats.nested_bp_count == 1
+    assert stats.nested_mf_count == 0
+    assert stats.nested_cc_count == 0
+
+
+def test_compute_model_stats_failure_counts(builder):
+    """Per-check counts are annotation-level. SYNGO_5371 fails invalid_mf_cc_relation;
+    every CHECK_NAMES key is present (0 where absent)."""
+    from gocam_unwinder.gocam_ttl import CHECK_NAMES
+    gocam_graph = builder.parse_ttl("resources/test/SYNGO_5371.ttl")
+    stats = builder.compute_model_stats(gocam_graph, "gomodel:syngo", extended=True)
+    assert set(stats.failure_counts.keys()) == set(CHECK_NAMES)
+    assert stats.failure_counts["invalid_mf_cc_relation"] >= 1
+    # a check this model does not trip stays 0
+    assert stats.failure_counts["mf_causal_mf"] == 0
+
+
+def test_compute_model_stats_edge_without_evidence_count(builder):
+    """66c7d41500000016.ttl has a no-evidence causal edge -> at least one
+    annotation flagged edge_without_evidence."""
+    gocam_graph = builder.parse_ttl("resources/test/66c7d41500000016.ttl")
+    stats = builder.compute_model_stats(gocam_graph, "gomodel:n", extended=True)
+    assert stats.failure_counts["edge_without_evidence"] >= 1
+
+
+def test_compute_model_stats_fixable_standard(builder):
+    """mf_nested_anatomy_example.ttl: the nested-anatomy annotation is standard
+    and a fixer target -> fixable_standard_count == 1, non-standard == 0."""
+    gocam_graph = builder.parse_ttl("resources/test/mf_nested_anatomy_example.ttl")
+    stats = builder.compute_model_stats(gocam_graph, "gomodel:mf", extended=True)
+    assert stats.fixable_standard_count == 1
+    assert stats.fixable_nonstandard_count == 0
+
+
+def test_compute_model_stats_fixable_nonstandard(builder):
+    """noev fixture: fixer target whose failed checks (edge_without_evidence plus
+    the inconsistent_evidence it induces) are all in NESTING_ATTRIBUTABLE_CHECKS
+    -> fixable_nonstandard_count == 1."""
+    gocam_graph = builder.parse_ttl("resources/test/mf_nested_anatomy_noev_example.ttl")
+    stats = builder.compute_model_stats(gocam_graph, "gomodel:noev", extended=True)
+    assert stats.fixable_nonstandard_count == 1
+    assert stats.fixable_standard_count == 0
+
+
+def test_compute_model_stats_unfixable_nonstandard(builder):
+    """unfixable fixture: fixer target but also fails invalid_gp_cc_relation
+    (not attributable to nesting) -> neither fixable count increments."""
+    gocam_graph = builder.parse_ttl("resources/test/mf_nested_anatomy_unfixable_example.ttl")
+    stats = builder.compute_model_stats(gocam_graph, "gomodel:unfix", extended=True)
+    assert stats.fixable_standard_count == 0
+    assert stats.fixable_nonstandard_count == 0
+    assert stats.failure_counts["invalid_gp_cc_relation"] >= 1
+
+
+def test_no_gp_at_all_flags_gp_less_annotation(builder):
+    """no_gp_at_all flags an annotation whose subgraph has no gene product, and
+    leaves a GP-bearing annotation standard. All edges of the flagged annotation
+    are recorded."""
+    gocam = builder.parse_ttl("resources/test/no_gp_at_all_example.ttl")
+    mfA = rdflib.term.URIRef("http://model.geneontology.org/no_gp_at_all_example/mfA")
+    gpB = rdflib.term.URIRef("http://model.geneontology.org/no_gp_at_all_example/gpB")
+    annots = gocam.standard_annotations + gocam.non_standard_annotations
+    a = next(x for x in annots if mfA in x.individuals)
+    b = next(x for x in annots if gpB in x.individuals)
+    assert set(a.failed_checks) == {"no_gp_at_all"}
+    assert a.failed_checks["no_gp_at_all"] == set(a.edges.keys())
+    assert a in gocam.non_standard_annotations  # classified non-standard
+    assert b.failed_checks == {}  # standard, GP present, not flagged
+    assert b in gocam.standard_annotations
+
+
+def test_no_gp_at_all_in_check_names():
+    from gocam_unwinder.gocam_ttl import CHECK_NAMES, NESTING_ATTRIBUTABLE_CHECKS
+    assert "no_gp_at_all" in CHECK_NAMES
+    assert "no_gp_at_all" not in NESTING_ATTRIBUTABLE_CHECKS
+
+
+def test_no_gp_at_all_in_criteria_report(builder):
+    """print_non_standard_annotation_failed_checks emits a no_gp_at_all row."""
+    import io
+    gocam = builder.parse_ttl("resources/test/no_gp_at_all_example.ttl")
+    buf = io.StringIO()
+    builder.print_non_standard_annotation_failed_checks(gocam, report_file=buf)
+    assert "no_gp_at_all" in buf.getvalue()
+
+
+def test_relation_fixtures_keep_one_standard_annotation(builder):
+    """After adding a GP backbone, each relation-test fixture's passing annotation
+    stays standard (exactly one standard annotation, empty failed_checks, has a GP)."""
+    for fname in ["mf_cc_relation_example", "mf_bp_relation_example",
+                  "bp_cc_relation_example", "mf_occurs_in_anatomy_example"]:
+        gocam = builder.parse_ttl(f"resources/test/{fname}.ttl")
+        assert len(gocam.standard_annotations) == 1, \
+            f"{fname}: expected 1 standard annotation, got {len(gocam.standard_annotations)}"
+        std = gocam.standard_annotations[0]
+        assert std.failed_checks == {}, f"{fname}: standard annotation has failures"
+        has_gp = any(
+            builder._gene_product_namespace_key(t) in builder.GP_NAMESPACE_KEYS
+            for e in std.edges.values() for t in (e.source_type, e.target_type))
+        assert has_gp, f"{fname}: standard annotation should contain a GP"
