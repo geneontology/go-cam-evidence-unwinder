@@ -655,11 +655,19 @@ class GoCamGraph:
             return title.replace("\t", " ").replace("\n", " ")
 
     def get_modelstate(self):
-        """Get the model state, looking only at the model-level subject."""
+        """Get the model state, looking only at the model-level subject.
+
+        A model may carry more than one modelstate value. If any of them is
+        "delete", return "delete" so the model is treated as deleted and skipped
+        (the delete value must win regardless of rdflib's object iteration order).
+        Otherwise return the first value, or None if there is none.
+        """
         model_uri = rdflib.URIRef(self.get_model_id())
         modelstate_pred = rdflib.URIRef("http://geneontology.org/lego/modelstate")
-        for modelstate in self.g.objects(model_uri, modelstate_pred):
-            return str(modelstate)
+        states = [str(s) for s in self.g.objects(model_uri, modelstate_pred)]
+        if "delete" in states:
+            return "delete"
+        return states[0] if states else None
 
     def get_groups(self):
         """Get all groups (providedBy values) at the model level."""

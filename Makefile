@@ -39,6 +39,7 @@ CRITERIA_FAIL_REPORT := $(TARGET_DIR)/models_split_criteria_failures_$(DATE).tsv
 DATE_CHANGE_REPORT := $(TARGET_DIR)/date_changes_$(DATE).tsv
 NON_STD_REPORT := $(TARGET_DIR)/remainders_report_$(DATE).tsv
 NON_STD_LOG := $(TARGET_DIR)/remainders_report_$(DATE).log
+NON_STD_STATS_REPORT := $(TARGET_DIR)/noctua_models_graph_counts_extended_$(DATE).tsv
 MODELS_NESTED_FIXED := $(TARGET_DIR)/models_nested_fixed
 NESTED_FIX_REPORT := $(TARGET_DIR)/nested_fixes_$(DATE).tsv
 NESTED_FIX_LOG := $(TARGET_DIR)/nested_fixes_$(DATE).log
@@ -180,7 +181,8 @@ $(NON_STD_REPORT): $(GO_ONTOLOGY) $(RO_ONTOLOGY) $(GROUPS_YAML)
 		--skip-prefix YeastPathways \
 		$(if $(SKIP_LIST),--skip-file $(SKIP_LIST),) \
 		--groups-yaml $(GROUPS_YAML) \
-		--tsv-output $@ | tee $(NON_STD_LOG)
+		--tsv-output $@ \
+		--stats-output $(NON_STD_STATS_REPORT) | tee $(NON_STD_LOG)
 
 .PHONY: non_std
 non_std: $(NON_STD_REPORT)
@@ -229,6 +231,7 @@ push-reports:
 	push "$(REPORT_FILE)" "Standard annotation model stats $(DATE)"; \
 	push "$(CRITERIA_FAIL_REPORT)" "Standard annotation criteria failures $(DATE)"; \
 	push "$(NON_STD_REPORT)" "Non-standard annotation remainders $(DATE)"; \
+	push "$(NON_STD_STATS_REPORT)" "Extended model stats $(DATE)"; \
 	push "$(NESTED_FIX_REPORT)" "Nested anatomical extensions fixed $(DATE)"
 
 # Clean up generated files

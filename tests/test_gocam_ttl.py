@@ -1821,3 +1821,11 @@ def test_relation_fixtures_keep_one_standard_annotation(builder):
             builder._gene_product_namespace_key(t) in builder.GP_NAMESPACE_KEYS
             for e in std.edges.values() for t in (e.source_type, e.target_type))
         assert has_gp, f"{fname}: standard annotation should contain a GP"
+
+
+def test_modelstate_prefers_delete_when_multivalued(builder):
+    """A model carrying multiple modelstate values, one of which is 'delete',
+    reports 'delete' so the skip check (modelstate == 'delete') catches it
+    regardless of rdflib's object iteration order."""
+    gocam = builder.parse_ttl("resources/test/multi_modelstate_delete_example.ttl")
+    assert gocam.modelstate == "delete"
