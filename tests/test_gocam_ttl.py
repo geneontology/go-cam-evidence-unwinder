@@ -12,6 +12,7 @@ _REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _REPO_ROOT not in sys.path:
     sys.path.insert(0, _REPO_ROOT)
 from debug_non_standard import pick_lead_aspect
+import debug_non_standard
 
 ontology_file = "target/go_20250601.json"  # TODO: Make this GitHub-friendly, maybe LFS
 
@@ -1846,6 +1847,76 @@ def test_no_gp_at_all_in_criteria_report(builder):
     buf = io.StringIO()
     builder.print_non_standard_annotation_failed_checks(gocam, report_file=buf)
     assert "no_gp_at_all" in buf.getvalue()
+
+
+def _read_remainders_tsv(path):
+    """Parse a remainders TSV into (header_list, list_of_row_dicts)."""
+    with open(path) as f:
+        lines = [ln.rstrip("\n") for ln in f if ln.strip()]
+    header = lines[0].split("\t")
+    rows = [dict(zip(header, ln.split("\t"))) for ln in lines[1:]]
+    return header, rows
+
+
+def _find_remainders_row(rows, model_suffix, source, predicate, target):
+    """Return the first row matching the given edge, asserting it exists."""
+    matches = [r for r in rows
+               if r["Model ID"].endswith(model_suffix)
+               and r["Source"] == source
+               and r["Predicate"] == predicate
+               and r["Target"] == target]
+    assert matches, (
+        f"expected a remainders row for {model_suffix}: "
+        f"{source} -[{predicate}]-> {target}")
+    return matches[0]
+
+
+def test_remainders_report_fixable_column(builder, tmp_path, monkeypatch):
+    """The remainders TSV gains a `Fixable` column (immediately after `Target`)
+    whose Yes/No value matches exactly what --fix-nested-anatomy
+    (plan_nested_anatomy_fixes) would rewrite -- including the planner's
+    `!=1 primary individual` skip, which a naive both-anatomical test would miss.
+    """
+    out = tmp_path / "remainders.tsv"
+
+    # Reuse the session-scoped builder (skip re-parsing the GO ontology) while
+    # still exercising main()'s full report-writing path. main() looks up
+    # GoCamGraphBuilder as a module global, so patching the module attribute
+    # makes it return our shared builder regardless of the constructor args.
+    monkeypatch.setattr(debug_non_standard, "GoCamGraphBuilder",
+                        lambda *a, **k: builder)
+    monkeypatch.setattr(sys, "argv", [
+        "debug_non_standard.py", "resources/test/",
+        "-o", "target/go_20250601.json",
+        "-r", "resources/test/ro_20250723.owl",
+        "--no-label-api",
+        "--tsv-output", str(out),
+    ])
+
+    debug_non_standard.main()
+
+    header, rows = _read_remainders_tsv(str(out))
+
+    # Column exists and sits immediately after Target.
+    assert header == ["Model ID", "Title", "Bucket", "Source", "Predicate",
+                      "Target", "Fixable", "ECO Codes", "Groups"]
+
+    # Fixable nested anatomy edge (the canonical CL -part_of-> EMAPA) -> Yes.
+    yes_row = _find_remainders_row(
+        rows, "5966411600000001", "CL:0000202", "part of", "EMAPA:17597")
+    assert yes_row["Fixable"] == "Yes"
+
+    # Non-anatomy nested edge (MF source) -> No.
+    no_row = _find_remainders_row(
+        rows, "multi_mf_anatomy_example",
+        "identical protein binding", "RO:0001025", "CL:0000066")
+    assert no_row["Fixable"] == "No"
+
+    # Design-intent guard: BOTH endpoints anatomical, but the annotation has an
+    # ambiguous (!=1) primary individual, so the planner skips it -> No.
+    skip_row = _find_remainders_row(
+        rows, "57c82fad00000252", "nucleus", "part of", "WBbt:0005396")
+    assert skip_row["Fixable"] == "No"
 
 
 def test_relation_fixtures_keep_one_standard_annotation(builder):

@@ -121,7 +121,7 @@ def main():
         "CC": nested_cc_extensions,
     }
 
-    # TSV rows: (model_id, title, bucket, source, predicate, target, eco_codes, groups)
+    # TSV rows: (model_id, title, bucket, source, predicate, target, fixable, eco_codes, groups)
     tsv_rows = []
     all_stats = []
 
@@ -138,6 +138,12 @@ def main():
 
         groups = "|".join(gocam.groups) if gocam.groups else ""
 
+        # Edges that --fix-nested-anatomy would actually rewrite (set of bnode IDs).
+        # Reuse the real planner so the "Fixable" column can never diverge from the
+        # fixer; warn=False keeps report generation quiet (matches compute_model_stats).
+        fixable_bnodes = {rec["bnode_id"]
+                          for rec in builder.plan_nested_anatomy_fixes(gocam, warn=False)}
+
         # Buckets 1a/1b/1c: nested_<aspect>_extensions — check ALL annotations (std + non-std).
         # An annotation lands in the single aspect bucket of its lead aspect (BP > CC > MF).
         all_annots = gocam.standard_annotations + gocam.non_standard_annotations
@@ -153,9 +159,10 @@ def main():
                 src = builder.term_label(edge.source_type) if edge.source_type else "?"
                 rel = builder.term_label(edge.property_uri) if edge.property_uri else "?"
                 tgt = builder.term_label(edge.target_type) if edge.target_type else "?"
+                fixable = "Yes" if edge.bnode_id in fixable_bnodes else "No"
                 print(f"             {src} —[{rel}]→ {tgt}")
                 tsv_rows.append((gocam.model_id, gocam.title, bucket_name,
-                                 src, rel, tgt, eco_codes, groups))
+                                 src, rel, tgt, fixable, eco_codes, groups))
 
         if not gocam.non_standard_annotations:
             continue
@@ -194,11 +201,12 @@ def main():
                 if bucket_name:
                     for bnode_id in annot.failed_checks["multiple_mf_bp"]:
                         edge = annot.edges[bnode_id]
+                        fixable = "Yes" if bnode_id in fixable_bnodes else "No"
                         tsv_rows.append((gocam.model_id, gocam.title, bucket_name,
                                          builder.term_label(edge.source_type) if edge.source_type else "?",
                                          builder.term_label(edge.property_uri) if edge.property_uri else "?",
                                          builder.term_label(edge.target_type) if edge.target_type else "?",
-                                         eco_codes, groups))
+                                         fixable, eco_codes, groups))
 
             # Bucket 4: inconsistent_evidence with different ECOs (only if no other failures)
             if annot.failed_checks.keys() == {"inconsistent_evidence"}:
@@ -206,11 +214,12 @@ def main():
                     extension_eco_differs.append(record)
                     classified = True
                     for edge in annot.edges.values():
+                        fixable = "Yes" if edge.bnode_id in fixable_bnodes else "No"
                         tsv_rows.append((gocam.model_id, gocam.title, "extension_eco_differs",
                                          builder.term_label(edge.source_type) if edge.source_type else "?",
                                          builder.term_label(edge.property_uri) if edge.property_uri else "?",
                                          builder.term_label(edge.target_type) if edge.target_type else "?",
-                                         eco_codes, groups))
+                                         fixable, eco_codes, groups))
 
             if not classified:
                 unclassified.append(record)
@@ -230,7 +239,7 @@ def main():
 
     # Write TSV report
     if args.tsv_output:
-        tsv_headers = ["Model ID", "Title", "Bucket", "Source", "Predicate", "Target", "ECO Codes", "Groups"]
+        tsv_headers = ["Model ID", "Title", "Bucket", "Source", "Predicate", "Target", "Fixable", "ECO Codes", "Groups"]
         with open(args.tsv_output, "w") as f:
             f.write("\t".join(tsv_headers) + "\n")
             for row in tsv_rows:
