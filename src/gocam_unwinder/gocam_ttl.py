@@ -670,12 +670,19 @@ class GoCamGraph:
         return states[0] if states else None
 
     def get_groups(self):
-        """Get all groups (providedBy values) at the model level."""
-        model_uri = rdflib.URIRef(self.get_model_id())
+        """Get all groups (providedBy values) for the model.
+
+        Prefers the model (Ontology) node's providedBy. Some models record group
+        provenance only on statements/evidence/axioms and omit the model-level
+        triple; for those, fall back to the distinct providedBy values found
+        anywhere in the graph so the group is still reported (rather than blank).
+        """
         provided_by_pred = rdflib.URIRef("http://purl.org/pav/providedBy")
-        groups = []
-        for group in self.g.objects(model_uri, provided_by_pred):
-            groups.append(str(group))
+        model_uri = rdflib.URIRef(self.get_model_id())
+        groups = [str(group) for group in self.g.objects(model_uri, provided_by_pred)]
+        if not groups:
+            groups = sorted({str(group)
+                             for group in self.g.objects(None, provided_by_pred)})
         return groups
 
     def find_axiom_bits(self, bnode_id):

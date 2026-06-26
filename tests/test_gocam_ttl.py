@@ -1941,3 +1941,35 @@ def test_modelstate_prefers_delete_when_multivalued(builder):
     regardless of rdflib's object iteration order."""
     gocam = builder.parse_ttl("resources/test/multi_modelstate_delete_example.ttl")
     assert gocam.modelstate == "delete"
+
+
+def test_get_groups_falls_back_to_statement_level_providedby(builder):
+    """A model with no model-level providedBy still reports its group from the
+    statement/evidence-level providedBy.
+
+    Regression for the blank Groups column: MGI_MGI_104518 and ~100 other corpus
+    models record providedBy only on statements/evidence/axioms and omit the
+    model (Ontology) node triple, leaving Groups blank even though every evidence
+    node carries the group.
+    """
+    gocam = builder.parse_ttl(
+        "resources/test/providedby_statement_only_example.ttl")
+
+    # Precondition: the model (Ontology) node carries no providedBy ...
+    model_uri = rdflib.term.URIRef(gocam.model_id)
+    provided_by = rdflib.term.URIRef("http://purl.org/pav/providedBy")
+    assert list(gocam.g.objects(model_uri, provided_by)) == [], \
+        "fixture should have no model-level providedBy"
+
+    # ... but the group is still recovered from the statement-level providedBy,
+    assert gocam.get_groups() == ["http://informatics.jax.org"]
+    # ... and resolved to its label via the builder's groups.yaml lookup.
+    assert gocam.groups == ["MGI"]
+
+
+def test_get_groups_prefers_model_level_when_present(builder):
+    """When the model node DOES carry providedBy, get_groups returns exactly that
+    (the statement-level fallback must not activate or double-count)."""
+    gocam = builder.parse_ttl("resources/test/MGI_MGI_1100089.ttl")
+    assert gocam.get_groups() == ["http://informatics.jax.org"]
+    assert gocam.groups == ["MGI"]

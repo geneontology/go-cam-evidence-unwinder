@@ -95,7 +95,7 @@ make clean-all  # Remove all target_* directories
 - MF-causal->MF Edges - Count of causal edges between molecular functions (in non-standard)
 - Edges w/o Evidence - Count of edges (OWL axioms with GO-CAM relations) that have no `lego:evidence` triple
 - Model State - Model state from `http://geneontology.org/lego/modelstate` (e.g., "production", "development")
-- Groups - Pipe-separated list of contributing groups from `http://purl.org/pav/providedBy` (resolved to labels if `--groups-yaml` provided, e.g., "MGI", "ZFIN", "SGD")
+- Groups - Pipe-separated list of contributing groups from `http://purl.org/pav/providedBy` (resolved to labels if `--groups-yaml` provided, e.g., "MGI", "ZFIN", "SGD"). Read from the model (Ontology) node when present; for models that record `providedBy` only on statements/evidence/axioms (no model-level triple, e.g. MGI_MGI_104518), `get_groups()` falls back to the distinct `providedBy` values found anywhere in the graph, so the column is populated rather than blank
 - Multi-Evidence GO Terms - Pipe-separated list of resolved GO term labels from multi-evidence annotations. **Collected only from *standard* (splittable) multi-evidence annotations** — so this is blank for a model whose multi-evidence annotations are all non-standard, even when the "Multi-Evidence Annotations" count (which includes non-standard) is non-zero. Excludes URIs and CURIEs that couldn't be resolved to labels.
 
 **Note:** Models with `modelstate == "delete"` are automatically skipped during processing.
@@ -186,9 +186,9 @@ When writing implementation plans, use the template at `docs/plans/PLAN-TEMPLATE
   - `model_id`: Model URI (e.g., "http://model.geneontology.org/MGI_MGI_1100089")
   - `title`: Model title
   - `modelstate`: Model state from `http://geneontology.org/lego/modelstate` (e.g., "production", "development", "delete")
-  - `groups`: List of contributing groups from `http://purl.org/pav/providedBy` (resolved to labels if lookup available)
+  - `groups`: List of contributing groups from `http://purl.org/pav/providedBy` (resolved to labels if lookup available). Sourced from the model node, with a fallback to statement/evidence/axiom-level `providedBy` when the model node has none (see `get_groups()`)
 - Key methods:
-  - `get_model_id()`, `get_title()`, `get_modelstate()`, `get_groups()`: Extract model-level metadata
+  - `get_model_id()`, `get_title()`, `get_modelstate()`, `get_groups()`: Extract model-level metadata. `get_groups()` prefers the model (Ontology) node's `providedBy` but falls back to the distinct `providedBy` values found anywhere in the graph (statements/evidence/axioms) when the model node carries none — so group provenance is still reported for models that omit the model-level triple (de-duplicated and sorted in the fallback path)
   - `extract_standard_annotations()`: Identifies and groups connected edges into StandardAnnotation objects
   - `get_evidence_metadata()`: Extracts metadata signature from evidence individuals for grouping
   - `group_evidence_by_metadata()`: Groups evidence across edges by identical metadata
@@ -459,6 +459,28 @@ Tests use real GO-CAM model examples in `resources/test/`:
   - Used to test the MF-led branch of `plan_nested_anatomy_fixes()`: the nested edge re-points onto the primary MF individual with `occurs_in`
 - **cc_nested_anatomy_example.ttl**: Synthetic CC-led model — `GP─located_in→CC(GO:0005634)`, `CC─part_of→CL:0000202` (direct extension), and the nested `CL:0000202─part_of→EMAPA:17597`
   - Used to test the CC-led branch of `plan_nested_anatomy_fixes()`: the nested edge re-points onto the primary CC individual but **keeps** `part_of` (CC-led does not switch to `occurs_in`)
+- **providedby_statement_only_example.ttl**: Synthetic model whose Ontology (model) node carries **no** `providedBy`; the group (`http://informatics.jax.org`) is recorded only on an evidence individual — mirrors MGI_MGI_104518 and ~100 other corpus models
+  - Used to test the statement-level fallback in `get_groups()`: with no model-level `providedBy`, the group is still recovered from the graph and resolves to `MGI`
+- **MGI_MGI_102539.ttl**: Mouse Tbx6 model with root-MF `causally_upstream_of_or_within` (RO:0002418) BP annotations (`enabled_by` MGI:102539) and a nested `GO:0005634─part_of→CL:0000222─part_of→EMAPA:16752` anatomy chain
+  - Real corpus example scanned by `test_remainders_report_fixable_column` (no dedicated assertions); its nested CC→CL→EMAPA chain shows up as a `nested_cc_extensions` row
+- **MGI_MGI_1335098.ttl**: Mouse Lig4 model with many root-MF `causally_upstream_of_or_within` BP annotations (DNA repair / immune development BPs) plus CL cell-type and EMAPA anatomy extensions
+  - Real corpus example scanned by `test_remainders_report_fixable_column` (no dedicated assertions)
+- **MGI_MGI_1927246.ttl**: Mouse Zfp326 model with multiple standard annotations (MF `enabled_by` MGI:1927246, CC extensions, a BP-led annotation) and date-/evidence-differing edges that trigger an evidence split
+  - Used by `test_multi_edge_evidence_grouping`: after `split_evidence_and_write_ttl()`, the `-2`-suffixed individual (`a2f2216c-…-2`) appears in the output, confirming the split was applied
+- **SGD_S000004491.ttl**: Yeast USA1 (SGD:S000004491) model with 6 standard + 1 multi-evidence annotation, using `enabled_by`/`part_of`/`has_input` with SGD gene products
+  - Real corpus example scanned by `test_remainders_report_fixable_column` (no dedicated assertions)
+- **contributes_to_example.ttl**: Synthetic model with a single `GP─contributes_to (RO:0002326)→MF` edge (MGI gene product, GO:0042802)
+  - Used by `test_gp_mf_relation_allows_contributes_to`: confirms `contributes_to` is a valid GP→MF relation (not flagged `invalid_gp_mf_relation`), leaving the annotation standard
+- **invalid_gp_mf_relation_example.ttl**: Synthetic model with a single `has_input` (RO:0002233) edge between an MGI gene product and an MF (GO:0042802) — the disallowed GP→MF direction (`has_input` is only valid MF→GP)
+  - Used by `test_gp_mf_relation_rejects_other_predicate` and `test_print_non_standard_annotation_failed_checks_includes_gp_mf_relation`: the edge is flagged `invalid_gp_mf_relation`, reported in the TSV, and the annotation is non-standard
+- **mf_nested_anatomy_noev_example.ttl**: Synthetic MF-led model — `MF(GO:0004672)─enabled_by→GP`, `MF─occurs_in→CL:0000202` (direct extension, evidenced), and a nested `CL:0000202─part_of→EMAPA:17597` edge **with no evidence triple** — so it fails `edge_without_evidence` and `inconsistent_evidence`, both in `NESTING_ATTRIBUTABLE_CHECKS`
+  - Used by `test_compute_model_stats_fixable_nonstandard`: `fixable_nonstandard_count == 1` because every failure is nesting-attributable
+- **mf_nested_anatomy_unfixable_example.ttl**: Synthetic MF-led model — the nested `CL:0000202─part_of→EMAPA:17597` fixer target, **plus** `GP─part_of→GO:0005634` (nucleus CC, which must use `located_in`) — so its only failed check is `invalid_gp_cc_relation`, which is NOT in `NESTING_ATTRIBUTABLE_CHECKS`
+  - Used by `test_compute_model_stats_unfixable_nonstandard`: although the model is a fixer target (has a nested anatomy edge), neither fixable count increments because the `invalid_gp_cc_relation` failure is not nesting-attributable
+- **multi_modelstate_delete_example.ttl**: Synthetic model carrying two `lego:modelstate` values — `"production"` and `"delete"` — on the same model node
+  - Used by `test_modelstate_prefers_delete_when_multivalued`: `get_modelstate()` returns `"delete"` regardless of rdflib's object iteration order, so the model is caught by the `modelstate == "delete"` skip
+- **no_gp_at_all_example.ttl**: Synthetic model with two annotations: one (`root-MF─is_active_in→GO:0005634`) with no gene product anywhere in its subgraph, and one (`MF(GO:0004672)─enabled_by→MGI-GP`) that has a gene product
+  - Used by `test_no_gp_at_all_flags_gp_less_annotation`, `test_no_gp_at_all_in_check_names`, and `test_no_gp_at_all_in_criteria_report`: the GP-less annotation is flagged `no_gp_at_all` (all edges recorded) and non-standard, the GP-bearing one passes; `no_gp_at_all` is in `CHECK_NAMES` but not `NESTING_ATTRIBUTABLE_CHECKS` and appears in the criteria TSV
 
 The test requires the GO ontology file at `target/go_20250601.json` (downloaded via Makefile). The MF-causal->MF test also requires `resources/test/ro_20250723.owl`.
 
@@ -544,3 +566,53 @@ The test requires the GO ontology file at `target/go_20250601.json` (downloaded 
 - `test_plan_nested_anatomy_fixes_mf()`: MF-led synthetic fixture (mf_nested_anatomy_example.ttl) — the nested edge is re-pointed onto the primary MF individual with `occurs_in`
 - `test_plan_nested_anatomy_fixes_cc()`: CC-led synthetic fixture (cc_nested_anatomy_example.ttl) — the nested edge is re-pointed onto the primary CC individual but **keeps** `part_of`
 - `test_remainders_report_fixable_column()`: Tests the remainders report's `Fixable` column. Invokes `debug_non_standard.main()` end-to-end against `resources/test/` (monkeypatching `debug_non_standard.GoCamGraphBuilder` to the session `builder` to avoid re-parsing the GO ontology, and `sys.argv`), parses the TSV, and asserts the header has `Fixable` immediately after `Target` and three ground-truth rows: `5966411600000001`'s `CL:0000202 ─part_of→ EMAPA:17597` is `Yes`; `multi_mf_anatomy_example`'s `identical protein binding ─RO:0001025→ CL` (non-anatomy MF source) is `No`; and `57c82fad00000252`'s `nucleus ─part_of→ WBbt:0005396` is `No` despite both endpoints being anatomical (its annotation has an ambiguous primary individual, so the planner skips it — the design-intent guard that the column defers to `plan_nested_anatomy_fixes`, not a naive both-anatomical check)
+- `test_get_groups_falls_back_to_statement_level_providedby()`: Tests that a model with no model-level `providedBy` (providedby_statement_only_example.ttl) still reports its group: `get_groups()` falls back to the statement-level `providedBy` (`http://informatics.jax.org`) and `gocam.groups` resolves to `MGI`. Regression for the blank Groups column (MGI_MGI_104518 and ~100 other corpus models)
+- `test_get_groups_prefers_model_level_when_present()`: Tests that when the model node DOES carry `providedBy` (MGI_MGI_1100089.ttl), `get_groups()` returns exactly that model-level value — the statement-level fallback must not activate or double-count
+- `test_get_primary_go_terms()`: Tests that `get_primary_go_terms()` on 5966411600000001.ttl's GO:0120045 annotation returns `{"MF": [GO:0003674], "BP": [GO:0120045]}` (type URIs, one per aspect) and no `"CC"` key
+- `test_resolve_mf_type_direct_uri()`: Tests that `_resolve_mf_type()` returns the input `URIRef` unchanged when it is a known MF URI (GO:0042802), using an empty graph
+- `test_resolve_mf_type_non_mf_uri_returns_none()`: Tests that `_resolve_mf_type()` returns `None` for a non-MF (BP) URI (GO:0006954), using an empty graph
+- `test_resolve_mf_type_complement_of_mf()`: Tests that `_resolve_mf_type()` resolves an `owl:complementOf` bnode class expression to the complemented MF URI (GO:0042802) via the `owl:complementOf` triple in a synthetic graph (NOT-qualified MF handling)
+- `test_gp_mf_relation_allows_enables()`: Verifies no annotation in MGI_MGI_1100089.ttl is flagged `invalid_gp_mf_relation`, confirming `enabled_by` backbone edges are accepted
+- `test_gp_mf_relation_allows_contributes_to()`: Verifies the single annotation in contributes_to_example.ttl is not flagged `invalid_gp_mf_relation` and stays standard, confirming `contributes_to` (RO:0002326) is a valid GP→MF relation
+- `test_gp_mf_relation_rejects_other_predicate()`: Verifies invalid_gp_mf_relation_example.ttl's annotation is flagged `invalid_gp_mf_relation` and lands non-standard (0 standard, 1 non-standard)
+- `test_print_non_standard_annotation_failed_checks_includes_gp_mf_relation()`: Verifies `print_non_standard_annotation_failed_checks()` output for invalid_gp_mf_relation_example.ttl contains `"invalid_gp_mf_relation"`
+- `test_collect_model_files_skip_filenames()`: Tests that `collect_model_files()` with `skip_filenames={"b.ttl"}` returns only a.ttl and c.ttl (and ignores notes.txt) from a temp directory
+- `test_collect_model_files_combines_filters()`: Tests that `collect_model_files()` applies `skip_prefixes`, `skip_filenames`, and `model_id_filter` together, returning only the one file passing all three
+- `test_builder_api_state_defaults()`: Verifies the session builder initializes the OLS API state correctly (`resolve_labels_api=False`, empty `_api_label_cache`, `_api_session=None`, `_api_consecutive_failures=0`, `_api_disabled=False`) and the `OLS4_TERMS_URL`/`OLS4_TIMEOUT`/`OLS4_MAX_CONSECUTIVE_FAILURES` constants
+- `test_select_label_prefers_defining_ontology()`: Tests that `_select_label()` returns the label from the `is_defining_ontology=True` entry (the `cl` "neuron") over same-label entries from other ontologies and junk labels
+- `test_select_label_prefix_match_when_no_defining()`: Tests that `_select_label()` falls back to the entry whose `ontology_name` matches the CURIE prefix when none is defining (picks `uberon` for `UBERON:0000955`)
+- `test_select_label_first_real_label_fallback()`: Tests that `_select_label()` returns the first non-junk label when there is no defining entry and no prefix match, skipping a junk label equal to the ID fragment
+- `test_select_label_single_defining()`: Tests that `_select_label()` returns `"germ cell"` for a single defining-ontology entry
+- `test_select_label_empty_returns_none()`: Tests that `_select_label()` returns `None` for an empty term list
+- `test_select_label_only_junk_returns_none()`: Tests that `_select_label()` returns `None` when every candidate label is junk (equal to the ID fragment/CURIE), even the defining one
+- `test_select_label_defining_junk_falls_through_to_real()`: Tests that `_select_label()` skips a defining entry whose label is a junk ID and returns the first real label from a later non-defining entry
+- `test_fetch_label_from_ols_success()`: Tests `_fetch_label_from_ols()` with a `_FakeSession` returning a valid OLS4 payload — returns `"neuron"`, makes exactly one HTTP call, leaves `_api_consecutive_failures` at 0 and `_api_disabled` `False`
+- `test_fetch_label_from_ols_network_error_returns_none()`: Tests that `_fetch_label_from_ols()` returns `None` and increments `_api_consecutive_failures` on a `requests.ConnectionError`
+- `test_fetch_label_from_ols_circuit_breaker()`: Tests that after `OLS4_MAX_CONSECUTIVE_FAILURES` consecutive failures `_api_disabled` becomes `True` and a subsequent call returns `None` with no further network request (`session.calls == 0`)
+- `test_fetch_label_from_ols_http_error_returns_none()`: Tests that `_fetch_label_from_ols()` returns `None` and increments `_api_consecutive_failures` on a non-2xx response (`raise_for_status()` raises)
+- `test_fetch_label_from_ols_non_dict_json_returns_none()`: Tests that `_fetch_label_from_ols()` returns `None` and increments `_api_consecutive_failures` when the 2xx JSON body is a non-dict (no `_embedded`)
+- `test_term_label_api_fallback()`: Tests that `term_label()` returns `"neuron"` for a CL URI when `resolve_labels_api=True` with a wired-up `_FakeSession` (via the `api_builder` fixture), confirming the OLS4 fallback path is reached
+- `test_term_label_api_cached_once()`: Verifies a successful OLS lookup is cached so a second `term_label()` on the same URI returns the label without a second network request (`session.calls == 1`)
+- `test_term_label_api_miss_negative_cached()`: Verifies an OLS miss (0 terms) is negatively cached so the CURIE fallback is returned on the second call without a second request (`session.calls == 1`)
+- `test_term_label_api_disabled_no_network()`: Verifies that with `resolve_labels_api=False`, `term_label()` returns the CURIE and `_fetch_label_from_ols` is never invoked (monkeypatched to raise if called)
+- `test_term_label_api_network_error_returns_curie()`: Verifies a `requests.ConnectionError` during an OLS lookup makes `term_label()` return the CURIE rather than raise
+- `test_gocam_ttl_parser_has_no_label_api_flag()`: Verifies the CLI parser exposes `--no-label-api`, setting `no_label_api=True` when present and `False` by default
+- `test_plan_nested_anatomy_fixes_warn_param()`: Verifies `plan_nested_anatomy_fixes(gocam, warn=False)` returns the same plan (same `bnode_id`s, length 1) as the default call on 5966411600000001.ttl — `warn` only suppresses output
+- `test_model_stats_base_header()`: Verifies `ModelStats.base_header()` returns exactly the 11-column `--report-file` header
+- `test_model_stats_base_row_formatting()`: Verifies `to_base_row()` renders `mixed_annotation_type=True` as `"Yes"`, a groups list as pipe-separated, and numeric fields as strings
+- `test_model_stats_base_row_empties()`: Verifies `to_base_row()` renders empty `groups`/`multi_evidence_go_terms` and a `None` `modelstate` as `""`, and `mixed_annotation_type=False` as `"No"`
+- `test_model_stats_extended_header()`: Verifies `extended_header()` is the 11 base columns + 5 triage columns (`Nested MF/BP/CC Extensions`, `Fixable (Standard)`, `Fixable (Non-Standard)`) + one `fail:<name>` column per `CHECK_NAMES` entry (`16 + len(CHECK_NAMES)` total)
+- `test_model_stats_extended_row_failcounts_order()`: Verifies `to_extended_row()` emits columns 11–15 as the nesting/fixable counts and the `fail:` columns in `CHECK_NAMES` order (correct count at the `edge_without_evidence` position, `"0"` elsewhere)
+- `test_nesting_attributable_checks_subset_of_check_names()`: Verifies every `NESTING_ATTRIBUTABLE_CHECKS` entry is also in `CHECK_NAMES`
+- `test_compute_model_stats_base()`: Verifies `compute_model_stats` on MGI_MGI_1100089.ttl returns `standard_count == 28`, a non-zero `std_multi_evidence_count`, an 11-element base row, and leaves extended fields (`nested_bp_count`, `fixable_standard_count`) at 0
+- `test_compute_model_stats_nested_buckets()`: Verifies `compute_model_stats(..., extended=True)` on 5966411600000001.ttl reports `nested_bp_count == 1` and `nested_mf_count == nested_cc_count == 0`
+- `test_compute_model_stats_failure_counts()`: Verifies on SYNGO_5371.ttl that `failure_counts` has a key for every `CHECK_NAMES` entry, `failure_counts["invalid_mf_cc_relation"] >= 1`, and `failure_counts["mf_causal_mf"] == 0`
+- `test_compute_model_stats_edge_without_evidence_count()`: Verifies `compute_model_stats(..., extended=True)` on 66c7d41500000016.ttl records `failure_counts["edge_without_evidence"] >= 1`
+- `test_compute_model_stats_fixable_standard()`: Verifies on mf_nested_anatomy_example.ttl (standard annotation with a nested anatomy edge) that `fixable_standard_count == 1` and `fixable_nonstandard_count == 0`
+- `test_compute_model_stats_fixable_nonstandard()`: Verifies on mf_nested_anatomy_noev_example.ttl (fixer target whose failed checks are all in `NESTING_ATTRIBUTABLE_CHECKS`) that `fixable_nonstandard_count == 1` and `fixable_standard_count == 0`
+- `test_compute_model_stats_unfixable_nonstandard()`: Verifies on mf_nested_anatomy_unfixable_example.ttl (fixer target whose only failed check, `invalid_gp_cc_relation`, is NOT in `NESTING_ATTRIBUTABLE_CHECKS`) that neither fixable count increments and `failure_counts["invalid_gp_cc_relation"] >= 1`
+- `test_no_gp_at_all_flags_gp_less_annotation()`: Verifies in no_gp_at_all_example.ttl that the GP-less annotation has `failed_checks == {"no_gp_at_all"}` (all edges recorded) and is non-standard, while the GP-bearing annotation passes and is standard
+- `test_no_gp_at_all_in_check_names()`: Verifies `"no_gp_at_all"` is in `CHECK_NAMES` and absent from `NESTING_ATTRIBUTABLE_CHECKS`
+- `test_no_gp_at_all_in_criteria_report()`: Verifies `print_non_standard_annotation_failed_checks` on no_gp_at_all_example.ttl emits at least one row containing `"no_gp_at_all"`
+- `test_relation_fixtures_keep_one_standard_annotation()`: Verifies that after GP backbones were added, each of mf_cc_relation_example, mf_bp_relation_example, bp_cc_relation_example, mf_occurs_in_anatomy_example has exactly one standard annotation with empty `failed_checks` and at least one GP endpoint
+- `test_modelstate_prefers_delete_when_multivalued()`: Verifies a model carrying multiple `modelstate` values including `"delete"` (multi_modelstate_delete_example.ttl) reports `gocam.modelstate == "delete"` regardless of rdflib iteration order
