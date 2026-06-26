@@ -1918,6 +1918,13 @@ def test_remainders_report_fixable_column(builder, tmp_path, monkeypatch):
         rows, "57c82fad00000252", "nucleus", "part of", "WBbt:0005396")
     assert skip_row["Fixable"] == "No"
 
+    # Real-world regression: a both-anatomical nested edge in a complex
+    # developmental subgraph (5745387b00001376) is reported but NOT fixable,
+    # because its anatomy region has multiple attachment points.
+    complex_row = _find_remainders_row(
+        rows, "5745387b00001376", "UBERON:0000965", "part of", "UBERON:0000019")
+    assert complex_row["Fixable"] == "No"
+
 
 def test_relation_fixtures_keep_one_standard_annotation(builder):
     """After adding a GP backbone, each relation-test fixture's passing annotation
@@ -1973,3 +1980,44 @@ def test_get_groups_prefers_model_level_when_present(builder):
     gocam = builder.parse_ttl("resources/test/MGI_MGI_1100089.ttl")
     assert gocam.get_groups() == ["http://informatics.jax.org"]
     assert gocam.groups == ["MGI"]
+
+
+def _annotation_with_individual(gocam_graph, individual_uri):
+    """Return the (standard or non-standard) annotation containing `individual_uri`."""
+    target = rdflib.term.URIRef(individual_uri)
+    for annot in gocam_graph.standard_annotations + gocam_graph.non_standard_annotations:
+        if target in annot.individuals:
+            return annot
+    return None
+
+
+def test_anatomy_attachment_is_simple(builder):
+    """_anatomy_attachment_is_simple is True for a single-boundary anatomy region
+    (5966411600000001: BP -occurs_in-> CL -part_of-> EMAPA) and False when the
+    region has >1 boundary edge (the multi-boundary synthetic fixture)."""
+    simple = builder.parse_ttl("resources/test/5966411600000001.ttl")
+    simple_annot = _annotation_with_individual(
+        simple, "http://model.geneontology.org/5966411600000001/5966411600000004")
+    assert simple_annot is not None
+    assert builder._anatomy_attachment_is_simple(simple_annot) is True
+
+    complex_g = builder.parse_ttl(
+        "resources/test/nested_anatomy_multi_boundary_example.ttl")
+    complex_annot = _annotation_with_individual(
+        complex_g,
+        "http://model.geneontology.org/nested_anatomy_multi_boundary_example/anat2")
+    assert complex_annot is not None
+    assert builder._anatomy_attachment_is_simple(complex_annot) is False
+
+
+def test_plan_nested_anatomy_fixes_skips_multi_boundary(builder):
+    """plan_nested_anatomy_fixes plans NO rewrite for an annotation whose anatomy
+    region has more than one boundary edge (the multi-boundary fixture), even
+    though it contains a both-anatomical nested edge. The simple fixture is
+    unaffected (still one rewrite)."""
+    complex_g = builder.parse_ttl(
+        "resources/test/nested_anatomy_multi_boundary_example.ttl")
+    assert builder.plan_nested_anatomy_fixes(complex_g, warn=False) == []
+
+    simple = builder.parse_ttl("resources/test/5966411600000001.ttl")
+    assert len(builder.plan_nested_anatomy_fixes(simple, warn=False)) == 1

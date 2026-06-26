@@ -1317,6 +1317,63 @@ class GoCamGraphBuilder:
                 primary.setdefault("CC", []).append(edge.target_uri)
         return primary
 
+    def _anatomy_attachment_is_simple(self, annot: StandardAnnotation) -> bool:
+        """
+        Return True if every connected anatomy region in `annot` attaches to the
+        rest of the model through at most one boundary edge.
+
+        An anatomy region is a connected component of anatomical individuals
+        (_is_anatomical_structure: GO cellular components + anatomy-ontology terms
+        such as CL/UBERON/EMAPA), joined by *internal* edges (both endpoints
+        anatomical -- the part_of chains). A *boundary* edge has exactly one
+        anatomical endpoint (it links the region to a non-anatomy node, e.g. a
+        primary BP -occurs_in-> CL placement, or a stray
+        BP -results_in_development_of-> anatomy edge). Boundary edges are counted
+        as distinct (source_uri, property_uri, target_uri) triples, so a
+        multi-evidence placement (two axiom bnodes, same triple) counts once.
+
+        A region with more than one boundary edge signals a complex (e.g.
+        developmental) subgraph that should not be auto-de-nested; this returns
+        False for the whole annotation in that case.
+        """
+        # 1. Anatomical flag per individual, from edge endpoint types.
+        is_anat = {}
+        for e in annot.edges.values():
+            if e.source_uri is not None:
+                is_anat[e.source_uri] = self._is_anatomical_structure(e.source_type)
+            if e.target_uri is not None:
+                is_anat[e.target_uri] = self._is_anatomical_structure(e.target_type)
+
+        # 2. Union-find over anatomical individuals joined by internal edges.
+        parent = {u: u for u, a in is_anat.items() if a}
+
+        def find(x):
+            while parent[x] != x:
+                parent[x] = parent[parent[x]]
+                x = parent[x]
+            return x
+
+        def union(a, b):
+            parent[find(a)] = find(b)
+
+        for e in annot.edges.values():
+            if is_anat.get(e.source_uri) and is_anat.get(e.target_uri):
+                union(e.source_uri, e.target_uri)
+
+        # 3. Distinct boundary edges per region (exactly one anatomical endpoint).
+        boundary = {}
+        for e in annot.edges.values():
+            s_anat = is_anat.get(e.source_uri, False)
+            t_anat = is_anat.get(e.target_uri, False)
+            if s_anat != t_anat:
+                anat_node = e.source_uri if s_anat else e.target_uri
+                root = find(anat_node)
+                boundary.setdefault(root, set()).add(
+                    (e.source_uri, e.property_uri, e.target_uri))
+
+        # 4. Simple iff every region has at most one boundary edge.
+        return all(len(edges) <= 1 for edges in boundary.values())
+
     def plan_nested_anatomy_fixes(self, gocam: GoCamGraph, warn: bool = True) -> list:
         """
         Build a list of rewrite instructions for nested anatomy extension edges.
@@ -1340,6 +1397,12 @@ class GoCamGraphBuilder:
         for annot in all_annots:
             lead, nested = find_nested_extensions(annot, self)
             if not nested:
+                continue
+            if not self._anatomy_attachment_is_simple(annot):
+                if warn:
+                    print(f"WARNING: skipping annotation in {gocam.model_id} "
+                          f"({gocam.title}) — anatomy has multiple attachment "
+                          f"points (complex subgraph)")
                 continue
             primary_individuals = self.get_primary_individuals(annot).get(lead, [])
             if len(primary_individuals) != 1:
