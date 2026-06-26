@@ -35,3 +35,48 @@
 	<http://www.w3.org/2002/07/owl#annotatedProperty> <http://purl.obolibrary.org/obo/BFO_0000050> ;
 	<http://www.w3.org/2002/07/owl#annotatedTarget> <http://model.geneontology.org/gp_cc_relation_example/cc2> ;
 	<http://geneontology.org/lego/evidence> <http://model.geneontology.org/gp_cc_relation_example/ev2> .
+
+# PASS: GP -part_of-> protein-containing complex (GO:0000307)  [new #3 complex branch]
+<http://model.geneontology.org/gp_cc_relation_example/gp3>
+	a <http://www.w3.org/2002/07/owl#NamedIndividual> , <http://identifiers.org/mgi/MGI:99830> ;
+	<http://purl.obolibrary.org/obo/BFO_0000050> <http://model.geneontology.org/gp_cc_relation_example/cc3> .
+<http://model.geneontology.org/gp_cc_relation_example/cc3>
+	a <http://www.w3.org/2002/07/owl#NamedIndividual> , <http://purl.obolibrary.org/obo/GO_0000307> .
+<http://model.geneontology.org/gp_cc_relation_example/ev3>
+	a <http://www.w3.org/2002/07/owl#NamedIndividual> , <http://purl.obolibrary.org/obo/ECO_0000314> ;
+	<http://purl.org/dc/elements/1.1/date> "2024-01-15" .
+[] a <http://www.w3.org/2002/07/owl#Axiom> ;
+	<http://www.w3.org/2002/07/owl#annotatedSource> <http://model.geneontology.org/gp_cc_relation_example/gp3> ;
+	<http://www.w3.org/2002/07/owl#annotatedProperty> <http://purl.obolibrary.org/obo/BFO_0000050> ;
+	<http://www.w3.org/2002/07/owl#annotatedTarget> <http://model.geneontology.org/gp_cc_relation_example/cc3> ;
+	<http://geneontology.org/lego/evidence> <http://model.geneontology.org/gp_cc_relation_example/ev3> .
+
+# FAIL: GP -located_in-> protein-containing complex (GO:0000307)  (should be part_of)
+<http://model.geneontology.org/gp_cc_relation_example/gp4>
+	a <http://www.w3.org/2002/07/owl#NamedIndividual> , <http://identifiers.org/mgi/MGI:88276> ;
+	<http://purl.obolibrary.org/obo/RO_0001025> <http://model.geneontology.org/gp_cc_relation_example/cc4> .
+<http://model.geneontology.org/gp_cc_relation_example/cc4>
+	a <http://www.w3.org/2002/07/owl#NamedIndividual> , <http://purl.obolibrary.org/obo/GO_0000307> .
+<http://model.geneontology.org/gp_cc_relation_example/ev4>
+	a <http://www.w3.org/2002/07/owl#NamedIndividual> , <http://purl.obolibrary.org/obo/ECO_0000314> ;
+	<http://purl.org/dc/elements/1.1/date> "2024-01-15" .
+[] a <http://www.w3.org/2002/07/owl#Axiom> ;
+	<http://www.w3.org/2002/07/owl#annotatedSource> <http://model.geneontology.org/gp_cc_relation_example/gp4> ;
+	<http://www.w3.org/2002/07/owl#annotatedProperty> <http://purl.obolibrary.org/obo/RO_0001025> ;
+	<http://www.w3.org/2002/07/owl#annotatedTarget> <http://model.geneontology.org/gp_cc_relation_example/cc4> ;
+	<http://geneontology.org/lego/evidence> <http://model.geneontology.org/gp_cc_relation_example/ev4> .
+
+# PASS: GP -is_active_in-> cellular anatomical structure (GO:0005634 nucleus)  [is_active_in now valid for anatomical]
+<http://model.geneontology.org/gp_cc_relation_example/gp5>
+	a <http://www.w3.org/2002/07/owl#NamedIndividual> , <http://identifiers.org/mgi/MGI:96522> ;
+	<http://purl.obolibrary.org/obo/RO_0002432> <http://model.geneontology.org/gp_cc_relation_example/cc5> .
+<http://model.geneontology.org/gp_cc_relation_example/cc5>
+	a <http://www.w3.org/2002/07/owl#NamedIndividual> , <http://purl.obolibrary.org/obo/GO_0005634> .
+<http://model.geneontology.org/gp_cc_relation_example/ev5>
+	a <http://www.w3.org/2002/07/owl#NamedIndividual> , <http://purl.obolibrary.org/obo/ECO_0000314> ;
+	<http://purl.org/dc/elements/1.1/date> "2024-01-15" .
+[] a <http://www.w3.org/2002/07/owl#Axiom> ;
+	<http://www.w3.org/2002/07/owl#annotatedSource> <http://model.geneontology.org/gp_cc_relation_example/gp5> ;
+	<http://www.w3.org/2002/07/owl#annotatedProperty> <http://purl.obolibrary.org/obo/RO_0002432> ;
+	<http://www.w3.org/2002/07/owl#annotatedTarget> <http://model.geneontology.org/gp_cc_relation_example/cc5> ;
+	<http://geneontology.org/lego/evidence> <http://model.geneontology.org/gp_cc_relation_example/ev5> .

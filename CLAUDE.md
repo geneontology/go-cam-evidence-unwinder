@@ -220,6 +220,7 @@ When writing implementation plans, use the template at `docs/plans/PLAN-TEMPLATE
   - `ACTS_UPSTREAM_OF_OR_WITHIN`: Root URI for the acts-upstream family (RO:0002264), used for checks #4 and #5
   - `ROOT_GO_TERMS`: Set of the three GO aspect root PURLs (MF GO:0003674, BP GO:0008150, CC GO:0005575)
   - `ANATOMY_NAMESPACE_KEYS`: Set of anatomy-ontology namespace keys (cl, uberon, emapa, wbbt, fbbt, zfa, ma, po)
+  - `COMPLEX_CC_ROOT` / `ANATOMICAL_CC_ROOTS`: CURIEs of the top CC is_a branches used by `_cc_branch` for the #3 GP→CC relation split (`GO:0032991`; `GO:0110165`, `GO:0044423`)
 - Cached relation URIs (set in `__init__`): `rel_enabled_by`, `rel_contributes_to`, `rel_has_input`, `rel_has_output`, `rel_part_of`, `rel_located_in`, `rel_is_active_in`, `rel_occurs_in`; also `acts_upstream_relations` (set of RO:0002264 descendants, empty without RO) and `mf_bp_valid_relations` (combined set of valid MF→BP relations for the #11 cardinality check)
 - Key methods:
   - `parse_ttl()`: Parses a TTL file, extracts model metadata (including modelstate and groups with label resolution), and applies filtering
@@ -231,6 +232,7 @@ When writing implementation plans, use the template at `docs/plans/PLAN-TEMPLATE
   - `_go_aspect()`: Returns `"MF"` | `"BP"` | `"CC"` | `None` for an individual's type node; MF resolution is `owl:complementOf`-aware via `_resolve_mf_type()`
   - `_is_root_go_term()`: Returns `True` if the type node is one of the three GO aspect root terms
   - `_is_anatomical_structure()`: Returns `True` if the type is a GO CC or has a namespace key in `ANATOMY_NAMESPACE_KEYS`; used by the #12 cardinality check
+  - `_cc_branch()`: Returns `"complex"` | `"anatomical"` | `None` — buckets a GO cellular component into its top is_a branch (protein-containing complex `GO:0032991` vs cellular anatomical structure `GO:0110165` / virion component `GO:0044423`). Drives the #3 `invalid_gp_cc_relation` branch split via the rule table's `tgt_cc_branch` constraint
   - `_category()`: Returns the disjoint endpoint category (`"MF"` | `"BP"` | `"CC"` | `"GP"` | `"ANATOMY"` | `None`) for use in the relation-validity rule table
   - `_build_relation_rules()`: Builds the declarative relation-validity rule table (list of dicts) for checks #3/#4/#5/#6/#10; RO-dependent rules (#4, #5) are appended only when an RO ontology is loaded
   - `_matches_relation_rule()`: Tests whether an edge matches a rule's src/tgt categories and root/nonroot constraints
@@ -313,9 +315,11 @@ Each `StandardAnnotation` has a `failed_checks` attribute:
    - MF↔MF edges are out of scope here (handled by `mf_causal_mf`).
 
 6. **Invalid GP→CC relation** (`invalid_gp_cc_relation`):
-   - A gene product (GP) connected to a non-root GO cellular component (CC) must use `located_in` (RO:0001025)
+   - A gene product (GP) connected to a non-root GO cellular component (CC) must use a relation that depends on the CC's subhierarchy (`_cc_branch`):
+     - **protein-containing complex** (`GO:0032991` is_a subtree) → must be `part_of` (BFO:0000050)
+     - **cellular anatomical structure** (`GO:0110165`) / **virion component** (`GO:0044423`) is_a subtree → must be `located_in` (RO:0001025) OR `is_active_in` (RO:0002432)
+   - The branch is determined by `_cc_branch()` via the GO is_a closure (the same closure `GoAspector` uses for aspect classification), exposed to the rule table as the `tgt_cc_branch` constraint (`"complex"` / `"anatomical"`). Implemented as two rows in `_build_relation_rules` that share the `invalid_gp_cc_relation` key.
    - When failed, only the offending edge is recorded
-   - Implemented via the declarative relation-validity rule table
 
 7. **Invalid GP→BP relation** (`invalid_gp_bp_relation`, requires RO ontology):
    - A gene product connected to any BP must use a relation in the `acts_upstream_of_or_within` (RO:0002264) family (the 11-member descendant set)
@@ -432,8 +436,8 @@ Tests use real GO-CAM model examples in `resources/test/`:
   - Used to test that `has_input`/`has_output` are allowed MF→GP extension relations (not flagged by `invalid_gp_mf_relation`)
 - **bp_cc_relation_example.ttl**: Synthetic model with a passing `BP─occurs_in→CC` and a failing `BP─located_in→CL` edge
   - Used to test `invalid_bp_cc_relation` check (#10): only the wrong-relation edge is flagged
-- **gp_cc_relation_example.ttl**: Synthetic model with a passing `GP─located_in→CC` and a failing `GP─part_of→CC` edge
-  - Used to test `invalid_gp_cc_relation` check (#3): only the wrong-relation edge is flagged
+- **gp_cc_relation_example.ttl**: Synthetic model with five single-edge GP→CC annotations covering both #3 branches: `GP─located_in→anatomical-CC` (pass), `GP─part_of→anatomical-CC` (fail), `GP─part_of→complex` (pass), `GP─located_in→complex` (fail), `GP─is_active_in→anatomical-CC` (pass)
+  - Used to test `invalid_gp_cc_relation` check (#3): a GP must be `part_of` a protein-containing complex (`GO:0032991`) but `located_in`/`is_active_in` a cellular anatomical structure (`GO:0110165`)/virion component (`GO:0044423`)
 - **gp_bp_relation_example.ttl**: Synthetic model with a passing `GP─acts_upstream_of_or_within→BP` and a failing `GP─part_of→BP` edge
   - Used to test `invalid_gp_bp_relation` check (#4, RO-dependent): only the wrong-relation edge is flagged
 - **mf_bp_relation_example.ttl**: Synthetic model with a passing `root-MF─causally_upstream_of_or_within→BP` and a failing `root-MF─located_in→BP` edge
@@ -519,7 +523,8 @@ The test requires the GO ontology file at `target/go_20250601.json` (downloaded 
 - `test_is_anatomical_structure()`: Unit test for `_is_anatomical_structure()`: GO CCs, CL, UBERON, EMAPA return `True`; GP, ChEBI, MF, BP return `False`
 - `test_category()`: Unit test for `_category()`: MF/BP/CC GO terms, GP (MGI/PR), and anatomy (CL) return the correct category string; ChEBI and `None` return `None`
 - `test_invalid_bp_cc_relation()`: Tests that only the wrong-relation `BP─located_in→CL` edge in bp_cc_relation_example.ttl is flagged under `invalid_bp_cc_relation`
-- `test_invalid_gp_cc_relation()`: Tests that only the wrong-relation `GP─part_of→CC` edge in gp_cc_relation_example.ttl is flagged under `invalid_gp_cc_relation`
+- `test_invalid_gp_cc_relation()`: Tests the #3 CC-subhierarchy split on gp_cc_relation_example.ttl via the per-edge `_flagged_sigs` helper — only `GP─part_of→anatomical-CC` and `GP─located_in→complex` are flagged; `located_in`/`is_active_in`→anatomical and `part_of`→complex pass
+- `test_cc_branch()`: Unit test for `_cc_branch()`: protein-containing complex terms (incl. the `GO:0032991` root, reflexive) return `"complex"`; cellular anatomical structures, the `GO:0110165` root, and virion component `GO:0044423` return `"anatomical"`; non-CC GO terms, GPs, BNodes, the bare CC root `GO:0005575`, and `None` return `None`
 - `test_invalid_gp_bp_relation()`: Tests that only the wrong-relation `GP─part_of→BP` edge in gp_bp_relation_example.ttl is flagged under `invalid_gp_bp_relation`
 - `test_invalid_gp_bp_relation_skipped_without_ro()`: Verifies that `invalid_gp_bp_relation` is not recorded when no RO ontology is loaded
 - `test_invalid_mf_bp_relation()`: Tests that `part_of`/`causally_upstream_of_or_within` MF→BP edges in real fixtures pass, and only the wrong-relation `root-MF─located_in→BP` edge in mf_bp_relation_example.ttl is flagged

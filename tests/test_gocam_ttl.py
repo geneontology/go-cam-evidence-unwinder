@@ -982,6 +982,27 @@ def test_category(builder):
     assert builder._category(None, g) is None
 
 
+def test_cc_branch(builder):
+    U = rdflib.URIRef
+    # protein-containing complex (GO:0032991) subtree -> "complex"
+    assert builder._cc_branch(U("http://purl.obolibrary.org/obo/GO_0000307")) == "complex"  # CDK holoenzyme complex
+    assert builder._cc_branch(U("http://purl.obolibrary.org/obo/GO_0032991")) == "complex"  # branch root (reflexive)
+    # cellular anatomical structure (GO:0110165) subtree -> "anatomical"
+    assert builder._cc_branch(U("http://purl.obolibrary.org/obo/GO_0005634")) == "anatomical"  # nucleus
+    assert builder._cc_branch(U("http://purl.obolibrary.org/obo/GO_0005829")) == "anatomical"  # cytosol
+    assert builder._cc_branch(U("http://purl.obolibrary.org/obo/GO_0110165")) == "anatomical"  # branch root (reflexive)
+    # virion component (GO:0044423) is its own top branch (NOT under GO:0110165) -> "anatomical"
+    assert builder._cc_branch(U("http://purl.obolibrary.org/obo/GO_0044423")) == "anatomical"
+    # The bare CC root (GO:0005575) is under no top-level branch -> None
+    assert builder._cc_branch(U("http://purl.obolibrary.org/obo/GO_0005575")) is None  # CC root
+    # Non-CC GO terms and non-GO nodes -> None
+    assert builder._cc_branch(U("http://purl.obolibrary.org/obo/GO_0008150")) is None  # BP root
+    assert builder._cc_branch(U("http://purl.obolibrary.org/obo/GO_0042802")) is None  # MF
+    assert builder._cc_branch(U("http://identifiers.org/mgi/MGI:1100089")) is None     # GP
+    assert builder._cc_branch(rdflib.BNode()) is None  # non-URIRef BNode
+    assert builder._cc_branch(None) is None
+
+
 # ---------------------------------------------------------------------------
 # Shared helper for Tasks 6–10 tests
 # ---------------------------------------------------------------------------
@@ -993,6 +1014,18 @@ def _flagged_props(gocam, key):
         for bnode_id in annot.failed_checks.get(key, set()):
             props.add(str(annot.edges[bnode_id].property_uri))
     return props
+
+
+def _flagged_sigs(gocam, key):
+    """Return {(property_uri, target_type)} string-tuples flagged under `key`
+    across all annotations -- precise enough to distinguish edges that share a
+    relation but differ in target."""
+    sigs = set()
+    for annot in gocam.standard_annotations + gocam.non_standard_annotations:
+        for bnode_id in annot.failed_checks.get(key, set()):
+            e = annot.edges[bnode_id]
+            sigs.add((str(e.property_uri), str(e.target_type)))
+    return sigs
 
 
 # ---------------------------------------------------------------------------
@@ -1008,14 +1041,22 @@ def test_invalid_bp_cc_relation(builder):
 
 
 # ---------------------------------------------------------------------------
-# Task 7: Rule #3 — GP->non-root CC must be located_in
+# Task 7: Rule #3 — GP->non-root CC : located_in/is_active_in (anatomical) or part_of (complex)
 # ---------------------------------------------------------------------------
 
 def test_invalid_gp_cc_relation(builder):
     gocam = builder.parse_ttl("resources/test/gp_cc_relation_example.ttl")
-    # Only the part_of GP->CC edge is flagged; the located_in edge is not.
-    assert _flagged_props(gocam, "invalid_gp_cc_relation") == {
-        "http://purl.obolibrary.org/obo/BFO_0000050"
+    # #3 splits by CC subhierarchy:
+    #   complex (GO:0032991 subtree)            -> part_of valid; located_in invalid
+    #   anatomical (GO:0110165 / GO:0044423)    -> located_in / is_active_in valid; part_of invalid
+    # Only gp2 (part_of -> cytosol, anatomical) and gp4 (located_in -> complex)
+    # are flagged. gp1 (located_in -> nucleus), gp3 (part_of -> complex), and
+    # gp5 (is_active_in -> nucleus) all pass.
+    assert _flagged_sigs(gocam, "invalid_gp_cc_relation") == {
+        ("http://purl.obolibrary.org/obo/BFO_0000050",
+         "http://purl.obolibrary.org/obo/GO_0005829"),  # part_of -> cytosol (anatomical) FAIL
+        ("http://purl.obolibrary.org/obo/RO_0001025",
+         "http://purl.obolibrary.org/obo/GO_0000307"),  # located_in -> complex FAIL
     }
 
 

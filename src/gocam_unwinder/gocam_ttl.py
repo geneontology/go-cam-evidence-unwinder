@@ -892,6 +892,15 @@ class GoCamGraphBuilder:
         "cl", "uberon", "emapa", "wbbt", "fbbt", "zfa", "ma", "po",
     }
 
+    # Top-level cellular-component branches (CURIEs), used by _cc_branch to pick
+    # the valid GP->CC relation for check #3. The CC aspect (GO:0005575) splits
+    # into these disjoint is_a subtrees:
+    #   GO:0032991 protein-containing complex  -> GP must be "part of"
+    #   GO:0110165 cellular anatomical structure | GO:0044423 virion component
+    #                                           -> GP must be "located in" / "is active in"
+    COMPLEX_CC_ROOT = "GO:0032991"
+    ANATOMICAL_CC_ROOTS = {"GO:0110165", "GO:0044423"}
+
     # EBI OLS4 REST API for resolving labels of terms not in the local GO/RO
     # ontologies (anatomy CL/UBERON/EMAPA/WBbt/..., plus CHEBI/ECO/PR/...).
     OLS4_TERMS_URL = "https://www.ebi.ac.uk/ols4/api/terms"
@@ -1036,6 +1045,34 @@ class GoCamGraphBuilder:
             return True
         return self._gene_product_namespace_key(type_node) in self.ANATOMY_NAMESPACE_KEYS
 
+    def _cc_branch(self, type_node):
+        """Bucket a GO cellular-component type into its top CC branch, by is_a
+        closure: "complex" (GO:0032991 protein-containing complex subtree) or
+        "anatomical" (GO:0110165 cellular anatomical structure / GO:0044423
+        virion component subtree). Returns None for non-GO / non-CC nodes (and
+        for a CC under none of the three top-level CC branch roots, e.g. the
+        bare CC root GO:0005575).
+
+        Uses the is_a closure (subClassOf only) -- the same closure GoAspector
+        uses for aspect classification -- so a complex that is part_of an
+        anatomical structure is still classified "complex". The closure is
+        non-reflexive, so the term itself is added back to classify a
+        branch-root term used directly as a target. Used by check #3 via the
+        tgt_cc_branch rule constraint."""
+        if not isinstance(type_node, URIRef):
+            return None
+        parsed = curie_util.contract_uri(str(type_node))
+        if not parsed or not parsed[0].startswith("GO:"):
+            return None
+        curie = parsed[0]
+        closure = set(self.go_aspector.get_isa_closure(curie))
+        closure.add(curie)  # reflexive: a branch-root term belongs to its own branch
+        if self.COMPLEX_CC_ROOT in closure:
+            return "complex"
+        if closure & self.ANATOMICAL_CC_ROOTS:
+            return "anatomical"
+        return None
+
     def _category(self, type_node, graph):
         """Disjoint endpoint category for an edge: "MF" | "BP" | "CC" | "GP" |
         "ANATOMY" | None. GO terms resolve to their aspect; otherwise a
@@ -1066,10 +1103,15 @@ class GoCamGraphBuilder:
             {"key": "invalid_bp_cc_relation", "src": {"BP"}, "tgt": {"CC", "ANATOMY"},
              "src_root_mf": False, "tgt_nonroot": False,
              "valid": {str(self.rel_occurs_in)}},
-            # #3  GP -> non-root CC : located_in
+            # #3a  GP -> non-root protein-containing complex (GO:0032991 subtree) : part_of
             {"key": "invalid_gp_cc_relation", "src": {"GP"}, "tgt": {"CC"},
-             "src_root_mf": False, "tgt_nonroot": True,
-             "valid": {str(self.rel_located_in)}},
+             "src_root_mf": False, "tgt_nonroot": True, "tgt_cc_branch": "complex",
+             "valid": {str(self.rel_part_of)}},
+            # #3b  GP -> non-root cellular anatomical structure (GO:0110165) /
+            #      virion component (GO:0044423) subtree : located_in OR is_active_in
+            {"key": "invalid_gp_cc_relation", "src": {"GP"}, "tgt": {"CC"},
+             "src_root_mf": False, "tgt_nonroot": True, "tgt_cc_branch": "anatomical",
+             "valid": {str(self.rel_located_in), str(self.rel_is_active_in)}},
             # #6  root-MF -> non-root CC : is_active_in
             {"key": "invalid_mf_cc_relation", "src": {"MF"}, "tgt": {"CC"},
              "src_root_mf": True, "tgt_nonroot": True,
@@ -1101,6 +1143,9 @@ class GoCamGraphBuilder:
         if rule["src_root_mf"] and not self._is_root_go_term(edge.source_type):
             return False
         if rule["tgt_nonroot"] and self._is_root_go_term(edge.target_type):
+            return False
+        branch = rule.get("tgt_cc_branch")
+        if branch is not None and self._cc_branch(edge.target_type) != branch:
             return False
         return True
 
