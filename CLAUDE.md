@@ -62,7 +62,7 @@ make target_$(date +%Y%m%d)/gpad_diff.txt          # Step 6: GPAD diff
 
 # Independent transformations of the source corpus (own output dirs, no conflict
 # with the split pipeline; run on their own)
-make non_std                                       # Remainders report (debug_non_standard.py)
+make non_std                                       # Convenience alias: remainders report is produced by the single gocam_ttl.py run (already emitted by models_split/fix_nested_anatomy)
 make fix_nested_anatomy                            # De-nest anatomy extensions -> target_YYYYMMDD/models_nested_fixed/
 
 # Clean up
@@ -83,10 +83,15 @@ make clean-all  # Remove all target_* directories
 - `gpad_export_dev.gpad` - GPAD export from split models
 - `gpad_export_prod.gpad` - GPAD export from original models
 - `gpad_diff.txt` - Diff between prod and dev GPADs
-- `noctua_models_graph_counts_YYYYMMDD.tsv` - Statistics report
+- `noctua_models_graph_counts_YYYYMMDD.tsv` - Statistics report (`--report-file`; **extended by default** — see below; use `--basic-report` for the 11 base columns only)
 - `models_split_criteria_failures_YYYYMMDD.tsv` - Criteria failure report
+- `remainders_report_YYYYMMDD.tsv` - Bucketed remainders report (`--remainders-report`; nested-extension / multi-MF-BP / ECO-differs triage)
 
 **Statistics report columns** (`--report-file`):
+
+`--report-file` is **extended by default** (base 11 columns + triage columns). Pass `--basic-report` to restrict output to the 11 base columns only.
+
+**Base columns (always present):**
 - Model ID, Title - Model identifier and title
 - Standard Annotations - Count of annotations passing all checks
 - Non-Standard Annotations - Count of annotations failing one or more checks
@@ -97,6 +102,14 @@ make clean-all  # Remove all target_* directories
 - Model State - Model state from `http://geneontology.org/lego/modelstate` (e.g., "production", "development")
 - Groups - Pipe-separated list of contributing groups from `http://purl.org/pav/providedBy` (resolved to labels if `--groups-yaml` provided, e.g., "MGI", "ZFIN", "SGD"). Read from the model (Ontology) node when present; for models that record `providedBy` only on statements/evidence/axioms (no model-level triple, e.g. MGI_MGI_104518), `get_groups()` falls back to the distinct `providedBy` values found anywhere in the graph, so the column is populated rather than blank
 - Multi-Evidence GO Terms - Pipe-separated list of resolved GO term labels from multi-evidence annotations. **Collected only from *standard* (splittable) multi-evidence annotations** — so this is blank for a model whose multi-evidence annotations are all non-standard, even when the "Multi-Evidence Annotations" count (which includes non-standard) is non-zero. Excludes URIs and CURIEs that couldn't be resolved to labels.
+
+**Extended triage columns (default; omitted with `--basic-report`):**
+- Nested MF Extensions - Count of annotations with nested MF extension edges
+- Nested BP Extensions - Count of annotations with nested BP extension edges
+- Nested CC Extensions - Count of annotations with nested CC extension edges
+- Fixable (Standard) - Count of standard annotations with at least one nested anatomy edge the fixer would rewrite
+- Fixable (Non-Standard) - Count of non-standard annotations whose only failed checks are nesting-attributable
+- `fail:<check>` columns - One column per check name (see `CHECK_NAMES`), counting how many annotations in the model failed that check
 
 **Note:** Models with `modelstate == "delete"` are automatically skipped during processing.
 
@@ -146,7 +159,15 @@ python src/gocam_unwinder/gocam_ttl.py \
   --output-dir output/ \
   --report-file report.tsv \
   --criteria-fail-report failures.tsv \
+  --remainders-report remainders.tsv \
   --date-change-report date_changes.tsv
+
+# Restrict --report-file to the 11 base columns (no extended triage)
+python src/gocam_unwinder/gocam_ttl.py \
+  -d path/to/models/folder \
+  -o target/go_current.json \
+  --report-file report.tsv \
+  --basic-report
 
 # Fix nested anatomy extensions (de-nest anatomy targets onto the primary term)
 # Writes only the models that were changed to --output-dir; --nested-fix-report is optional.
@@ -160,6 +181,17 @@ python src/gocam_unwinder/gocam_ttl.py \
   --output-dir output/ \
   --nested-fix-report nested_fixes.tsv
 ```
+
+**Report flag summary:**
+
+| Flag | Report emitted | When available |
+|---|---|---|
+| `--report-file PATH` | Model stats (extended by default) | always |
+| `--basic-report` | Restricts `--report-file` to base 11 columns | always |
+| `--criteria-fail-report PATH` | Per-edge standard-annotation criteria failures | always |
+| `--remainders-report PATH` | Bucketed non-standard/nested-extension triage | always |
+| `--date-change-report PATH` | Evidence date updates during splitting | only with `--split-evidence` |
+| `--nested-fix-report PATH` | Anatomy-extension rewrite log | only with `--fix-nested-anatomy` |
 
 **`--fix-nested-anatomy` mode:** For each annotation, finds extension edges where **both** endpoints are anatomical structures (anatomy ontologies or GO cellular components) and whose source is not the lead-aspect primary GO term (i.e. genuinely *nested*, such as `BP ─occurs_in→ CL ─part_of→ EMAPA`), and rewrites each so its source becomes the annotation's **primary individual** and its relation becomes `occurs_in` (MF/BP-led) or stays as-is (CC-led, typically `part_of`). Each qualifying edge is de-nested independently; intermediate direct extensions (e.g. `BP ─occurs_in→ CL`) are kept. Annotations whose anatomy region has more than one attachment point (boundary edge) to the rest of the model — the hallmark of a complex developmental subgraph — are left entirely unchanged (and still appear in the remainders report as `Fixable=No`). Only models with at least one rewrite are written. The fix is idempotent (a second run is a no-op). `--nested-fix-report` columns: Model ID, Title, Lead Aspect, Primary Term, Old Source, Old Relation, Target, New Relation. This mode is an **independent** transformation of the source models: it reads the source corpus directly (not the split output) and is mutually exclusive with `--split-evidence` in a single invocation (combining them is a hard error). The Makefile exposes it as the standalone `fix_nested_anatomy` target, which writes to its own `$(TARGET_DIR)/models_nested_fixed` directory — so running it alongside the split pipeline never conflicts.
 
@@ -246,14 +278,26 @@ When writing implementation plans, use the template at `docs/plans/PLAN-TEMPLATE
   - `get_primary_individuals()`: Mirror of `get_primary_go_terms()` that returns the primary *individual* URIs per aspect (MF→source_uri, BP/CC→target_uri) via the same `_backbone_role()` dispatch. The two methods are byte-for-byte parallel traversals, so for a given aspect their lists are index-aligned. Used by `plan_nested_anatomy_fixes()` to find which individual a nested edge re-points onto
   - `plan_nested_anatomy_fixes(gocam)`: Builds the rewrite plan for the `--fix-nested-anatomy` mode. For every annotation (standard and non-standard), finds nested extension edges (`find_nested_extensions()`) whose source and target types are **both** anatomical structures (`_is_anatomical_structure()`), and emits one instruction dict per edge re-pointing it onto the lead aspect's primary individual. New relation is `occurs_in` (BFO:0000066) when the lead aspect is MF or BP, or the edge's existing relation (typically `part_of`) when CC. Annotations whose lead aspect has 0 or >1 primary individual are skipped with a warning. An additional **attachment gate** (`_anatomy_attachment_is_simple`) skips the *entire* annotation when any connected anatomy region attaches to the rest of the model through more than one *boundary edge* (an edge with exactly one anatomical endpoint — e.g. a primary `occurs_in` placement plus a stray `results_in_development_of` from another BP). This leaves complex, richly-connected developmental subgraphs (e.g. `5745387b00001376`) unfixed while the simple single-attach chains stay fixable. Instruction-dict keys: `model_id, title, lead_aspect, primary_term, bnode_id, old_source_uri, old_property_uri, target_uri, new_source_uri, new_property_uri, old_source_type, target_type`. Consumed by `GoCamGraph.rewrite_edge_source_and_relation()` in `main()`
 
-**Module-level helpers** (`src/gocam_unwinder/gocam_ttl.py`) — `ASPECT_PRIORITY = ("BP", "CC", "MF")`, `pick_lead_aspect(primary_terms)` (first aspect in `ASPECT_PRIORITY` present in the dict, or `None`), and `find_nested_extensions(annot, builder)` (returns `(lead_aspect, nested_edges)`, where `nested_edges` are extension edges whose `source_type` is not in the lead aspect's primary URI set). These were promoted from `debug_non_standard.py` (which now imports them) so both the `--fix-nested-anatomy` fixer and the remainders-report triage script share one definition.
+**Module-level helpers** (`src/gocam_unwinder/gocam_ttl.py`) — `ASPECT_PRIORITY = ("BP", "CC", "MF")`, `pick_lead_aspect(primary_terms)` (first aspect in `ASPECT_PRIORITY` present in the dict, or `None`), and `find_nested_extensions(annot, builder)` (returns `(lead_aspect, nested_edges)`, where `nested_edges` are extension edges whose `source_type` is not in the lead aspect's primary URI set). These live in `gocam_ttl.py` and are imported by the new `remainders_report.py` module so both the `--fix-nested-anatomy` fixer and the remainders-report bucketing share one definition.
 
-**Remainders report** (`debug_non_standard.py --tsv-output`) — a triage TSV with one row per bucketed edge. Columns: `Model ID, Title, Bucket, Source, Predicate, Target, Fixable, ECO Codes, Groups`. `Bucket` is the edge's triage class (`nested_mf_extensions` / `nested_bp_extensions` / `nested_cc_extensions`, `multi_mf_same_bp`, `multi_bp_same_mf`, `extension_eco_differs`). `Fixable` is `Yes`/`No` indicating whether `--fix-nested-anatomy` would actually rewrite that edge. It is sourced from `builder.plan_nested_anatomy_fixes(gocam, warn=False)` bnode-id membership (the set is computed **once per model**, then every `tsv_rows.append` site sets `"Yes" if <edge bnode> in fixable_bnodes else "No"`), so it cannot diverge from the fixer and captures the planner's full qualification — both endpoints anatomical **and** the annotation's lead aspect having exactly one primary individual. Consequently a both-anatomical nested edge can still read `No` when its annotation has an ambiguous (0 or >1) attach point (e.g. `57c82fad00000252`'s `nucleus ─part_of→ WBbt`). A both-anatomical nested edge can also read `No` when its annotation's anatomy region has more than one attachment point (e.g. `5745387b00001376`, where the camera-type-eye / lens / epithelial-cell anatomy nodes each carry a `results_in_development_of`/`results_in_morphogenesis_of` edge from a developmental BP) — `plan_nested_anatomy_fixes` skips such complex subgraphs via `_anatomy_attachment_is_simple`. `warn=False` suppresses the planner's per-annotation skip warnings during report generation (matching `compute_model_stats`). Tested by `test_remainders_report_fixable_column`, which invokes `debug_non_standard.main()` end-to-end against `resources/test/` (reusing the session `builder` via monkeypatch) and asserts the column on three ground-truth rows.
+**Remainders report** (`gocam_ttl.py --remainders-report`; bucketing logic in `src/gocam_unwinder/remainders_report.py`) — a triage TSV produced by `gocam_ttl.main()` in the same single-parse run as the stats and criteria reports. Columns: `Model ID, Title, Bucket, Source, Predicate, Target, Fixable, ECO Codes, Groups`. `Bucket` is the edge's triage class (`nested_mf_extensions` / `nested_bp_extensions` / `nested_cc_extensions`, `multi_mf_same_bp`, `multi_bp_same_mf`, `extension_eco_differs`). `Fixable` is `Yes`/`No` indicating whether `--fix-nested-anatomy` would actually rewrite that edge. It is sourced from `builder.plan_nested_anatomy_fixes(gocam, warn=False)` bnode-id membership (the set is computed **once per model**, then every `rows.append` site sets `"Yes" if <edge bnode> in fixable_bnodes else "No"`), so it cannot diverge from the fixer and captures the planner's full qualification — both endpoints anatomical **and** the annotation's lead aspect having exactly one primary individual. Consequently a both-anatomical nested edge can still read `No` when its annotation has an ambiguous (0 or >1) attach point (e.g. `57c82fad00000252`'s `nucleus ─part_of→ WBbt`). A both-anatomical nested edge can also read `No` when its annotation's anatomy region has more than one attachment point (e.g. `5745387b00001376`, where the camera-type-eye / lens / epithelial-cell anatomy nodes each carry a `results_in_development_of`/`results_in_morphogenesis_of` edge from a developmental BP) — `plan_nested_anatomy_fixes` skips such complex subgraphs via `_anatomy_attachment_is_simple`. `warn=False` suppresses the planner's per-annotation skip warnings during report generation (matching `compute_model_stats`). Tested by `test_remainders_report_fixable_column`, which invokes `gocam_ttl.main()` with `--remainders-report` end-to-end against `resources/test/` (monkeypatching `gocam_unwinder.gocam_ttl.GoCamGraphBuilder` to the session `builder` to avoid re-parsing the GO ontology) and asserts the column on four ground-truth rows.
 
 **`load_groups_lookup(groups_yaml_path)`** (`src/gocam_unwinder/gocam_ttl.py:65-88`)
 - Loads groups.yaml from go-site and creates a URI → label lookup dictionary
 - The groups.yaml file contains entries like: `{id: "http://informatics.jax.org", label: "MGI"}`
 - Returns dict mapping group URIs to their labels (e.g., `{"http://informatics.jax.org": "MGI"}`)
+
+**`remainders_report` module** (`src/gocam_unwinder/remainders_report.py`)
+- Houses the bucketing/classification logic for the `--remainders-report` TSV; lives inside the package so it is importable regardless of working directory
+- Public functions:
+  - `collect_model_remainders(builder, gocam) -> (rows, bucket_hits)`: per-model entry point called from `gocam_ttl.main()`. Runs full bucketing (nested `<aspect>` extensions, `multi_mf_same_bp`, `multi_bp_same_mf`, `extension_eco_differs`, `unclassified`) for one already-parsed model and returns its TSV rows plus annotation-level `bucket_hits` for the end-of-run summary
+  - `classify_multiple_mf_bp(annot)`: sub-classifies a `multiple_mf_bp` failure as `"same_bp"`, `"same_mf"`, or `None`
+  - `has_differing_eco_types(annot, gocam)`: returns `True` if edges in the annotation carry evidence with different ECO types
+  - `get_eco_types_for_annot(annot, gocam)`: returns the set of ECO type URIs across all evidence in an annotation
+  - `write_remainders_tsv(path, rows)`: writes the header + row list to the given file path
+  - `print_bucket_summary(bucket_hits, total_non_std)`: prints the end-of-run bucket summary to stdout
+- `REMAINDERS_HEADER` constant: `["Model ID", "Title", "Bucket", "Source", "Predicate", "Target", "Fixable", "ECO Codes", "Groups"]`
+- Imported **locally inside `gocam_ttl.main()`** (not at module top) to avoid an import cycle — this module imports `find_nested_extensions` from `gocam_ttl`, which is only fully defined once `gocam_ttl` finishes loading
 
 ### Key Algorithm: Standard Annotation Extraction
 
@@ -560,7 +604,7 @@ The test requires the GO ontology file at `target/go_20250601.json` (downloaded 
 - `test_multiple_mf_bp()`: Tests that both MF→BP edges in multi_mf_bp_example.ttl are flagged under `multiple_mf_bp` (the new key), and the old `multiple_mf_part_of` key is absent
 - `test_multiple_mf_anatomy()`: Tests that both MF→anatomy edges in multi_mf_anatomy_example.ttl are flagged under `multiple_mf_anatomy`
 - `test_enabler_not_gp()`: Tests that only the ChEBI-enabled edge in enabler_not_gp_example.ttl is flagged under `enabler_not_gp`
-- `test_mgi_2182965_lead_aspect_is_mf()`: Tests that MGI_MGI_2182965's single annotation has remainders-report lead aspect MF (not BP), via `pick_lead_aspect(builder.get_primary_go_terms(annot))` (imported from `debug_non_standard.py`, which now re-exports it from `gocam_ttl.py`). Regression for the root-MF BP gate: the specific MF (`GO:0005515`) `─part_of→` BP must not make BP win
+- `test_mgi_2182965_lead_aspect_is_mf()`: Tests that MGI_MGI_2182965's single annotation has remainders-report lead aspect MF (not BP), via `pick_lead_aspect(builder.get_primary_go_terms(annot))` (imported directly from `gocam_unwinder.gocam_ttl`). Regression for the root-MF BP gate: the specific MF (`GO:0005515`) `─part_of→` BP must not make BP win
 - `test_mgi_2182965_specific_mf_part_of_bp_is_not_backbone()`: Tests that for MGI_MGI_2182965 `get_primary_go_terms()` returns only an `MF` key (primary `GO:0005515`, no `BP`) and that the specific-MF `─part_of→` BP edge appears in `get_extension_edges()` — confirming `_backbone_role()`'s root-MF gate classifies it as an extension
 - `test_causal_root_mf_to_bp_is_backbone()`: Tests that a `root-MF ─causally_upstream_of_or_within (RO:0002418)→ BP` edge (the passing causal edge in mf_bp_relation_example.ttl) is a BP backbone — `get_primary_go_terms()` registers the BP primary (`GO:0006954`) and the edge is not in `get_extension_edges()`. Confirms `_backbone_role()` accepts the full `mf_bp_valid_relations` set, not just `part_of`
 - `test_get_primary_individuals()`: Tests that `get_primary_individuals()` on 5966411600000001.ttl's GO:0120045 annotation returns `{"MF": [...0003], "BP": [...0004]}` (individual URIs, not types) and no `"CC"` key
@@ -570,7 +614,7 @@ The test requires the GO ontology file at `target/go_20250601.json` (downloaded 
 - `test_plan_nested_anatomy_fixes_cc()`: CC-led synthetic fixture (cc_nested_anatomy_example.ttl) — the nested edge is re-pointed onto the primary CC individual but **keeps** `part_of`
 - `test_anatomy_attachment_is_simple()`: Tests `_anatomy_attachment_is_simple` — `True` for `5966411600000001`'s single-boundary anatomy region, `False` for `nested_anatomy_multi_boundary_example` and `5745387b00001376` (regions with >1 boundary edge)
 - `test_plan_nested_anatomy_fixes_skips_multi_boundary()`: Tests that `plan_nested_anatomy_fixes` plans no rewrite for the multi-boundary fixture while `5966411600000001` still yields its one rewrite (the real `5745387b00001376` regression is covered by `test_anatomy_attachment_is_simple` and `test_remainders_report_fixable_column`)
-- `test_remainders_report_fixable_column()`: Tests the remainders report's `Fixable` column. Invokes `debug_non_standard.main()` end-to-end against `resources/test/` (monkeypatching `debug_non_standard.GoCamGraphBuilder` to the session `builder` to avoid re-parsing the GO ontology, and `sys.argv`), parses the TSV, and asserts the header has `Fixable` immediately after `Target` and three ground-truth rows: `5966411600000001`'s `CL:0000202 ─part_of→ EMAPA:17597` is `Yes`; `multi_mf_anatomy_example`'s `identical protein binding ─RO:0001025→ CL` (non-anatomy MF source) is `No`; and `57c82fad00000252`'s `nucleus ─part_of→ WBbt:0005396` is `No` despite both endpoints being anatomical (its annotation has an ambiguous primary individual, so the planner skips it — the design-intent guard that the column defers to `plan_nested_anatomy_fixes`, not a naive both-anatomical check). Also asserts the `5745387b00001376` `UBERON:0000965 ─part_of→ UBERON:0000019` row reads `Fixable=No` (a both-anatomical nested edge in a complex developmental subgraph whose anatomy region has multiple attachment points)
+- `test_remainders_report_fixable_column()`: Tests the remainders report's `Fixable` column. Invokes `gocam_ttl.main()` with `--remainders-report` end-to-end against `resources/test/` (monkeypatching `gocam_unwinder.gocam_ttl.GoCamGraphBuilder` to the session `builder` to avoid re-parsing the GO ontology, and `sys.argv`), parses the TSV, and asserts the header has `Fixable` immediately after `Target` and four ground-truth rows: `5966411600000001`'s `CL:0000202 ─part_of→ EMAPA:17597` is `Yes`; `multi_mf_anatomy_example`'s `identical protein binding ─RO:0001025→ CL:0000066` (non-anatomy MF source) is `No`; `57c82fad00000252`'s `nucleus ─part_of→ WBbt:0005396` is `No` despite both endpoints being anatomical (its annotation has an ambiguous primary individual, so the planner skips it — the design-intent guard that the column defers to `plan_nested_anatomy_fixes`, not a naive both-anatomical check); and `5745387b00001376`'s `UBERON:0000965 ─part_of→ UBERON:0000019` row reads `Fixable=No` (a both-anatomical nested edge in a complex developmental subgraph whose anatomy region has multiple attachment points)
 - `test_get_groups_falls_back_to_statement_level_providedby()`: Tests that a model with no model-level `providedBy` (providedby_statement_only_example.ttl) still reports its group: `get_groups()` falls back to the statement-level `providedBy` (`http://informatics.jax.org`) and `gocam.groups` resolves to `MGI`. Regression for the blank Groups column (MGI_MGI_104518 and ~100 other corpus models)
 - `test_get_groups_prefers_model_level_when_present()`: Tests that when the model node DOES carry `providedBy` (MGI_MGI_1100089.ttl), `get_groups()` returns exactly that model-level value — the statement-level fallback must not activate or double-count
 - `test_get_primary_go_terms()`: Tests that `get_primary_go_terms()` on 5966411600000001.ttl's GO:0120045 annotation returns `{"MF": [GO:0003674], "BP": [GO:0120045]}` (type URIs, one per aspect) and no `"CC"` key
@@ -621,3 +665,7 @@ The test requires the GO ontology file at `target/go_20250601.json` (downloaded 
 - `test_no_gp_at_all_in_criteria_report()`: Verifies `print_non_standard_annotation_failed_checks` on no_gp_at_all_example.ttl emits at least one row containing `"no_gp_at_all"`
 - `test_relation_fixtures_keep_one_standard_annotation()`: Verifies that after GP backbones were added, each of mf_cc_relation_example, mf_bp_relation_example, bp_cc_relation_example, mf_occurs_in_anatomy_example has exactly one standard annotation with empty `failed_checks` and at least one GP endpoint
 - `test_modelstate_prefers_delete_when_multivalued()`: Verifies a model carrying multiple `modelstate` values including `"delete"` (multi_modelstate_delete_example.ttl) reports `gocam.modelstate == "delete"` regardless of rdflib iteration order
+- `test_collect_model_remainders_fixable_row()`: Tests `collect_model_remainders(builder, gocam)` (from `remainders_report.py`) on 5966411600000001.ttl — verifies it returns a row for `CL:0000202 ─part of→ EMAPA:17597` with `Fixable="Yes"` and a `nested_bp_extensions` bucket hit
+- `test_main_callable()`: Tests that `gocam_ttl.main()` runs end-to-end on a single model and writes a TSV with a header row to `--report-file` (with `GoCamGraphBuilder` monkeypatched to the session builder)
+- `test_report_file_extended_by_default()`: Verifies `--report-file` writes the extended header (`ModelStats.extended_header()`) by default when no `--basic-report` flag is passed
+- `test_report_file_basic_with_flag()`: Verifies `--basic-report` switches `--report-file` back to the base 11-column header (`ModelStats.base_header()`)

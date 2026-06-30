@@ -4,15 +4,8 @@ import sys
 import pytest
 import requests
 import rdflib
-from gocam_unwinder.gocam_ttl import GoCamGraph, GoCamGraphBuilder
-
-# debug_non_standard.py lives at the repo root (not under src/ or tests/), so
-# make the repo root importable for the remainders-report bucketing helpers.
-_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-if _REPO_ROOT not in sys.path:
-    sys.path.insert(0, _REPO_ROOT)
-from debug_non_standard import pick_lead_aspect
-import debug_non_standard
+from gocam_unwinder.gocam_ttl import GoCamGraph, GoCamGraphBuilder, ModelStats, pick_lead_aspect
+from gocam_unwinder import gocam_ttl
 
 ontology_file = "target/go_20250601.json"  # TODO: Make this GitHub-friendly, maybe LFS
 
@@ -1849,6 +1842,82 @@ def test_no_gp_at_all_in_criteria_report(builder):
     assert "no_gp_at_all" in buf.getvalue()
 
 
+def test_collect_model_remainders_fixable_row(builder):
+    """collect_model_remainders bucket the canonical nested anatomy edge and
+    marks it Fixable=Yes, matching what --fix-nested-anatomy would rewrite."""
+    from gocam_unwinder.remainders_report import collect_model_remainders
+
+    gocam = builder.parse_ttl("resources/test/5966411600000001.ttl")
+    rows, bucket_hits = collect_model_remainders(builder, gocam)
+
+    # Tuple layout: (model_id, title, bucket, source, predicate, target,
+    #                fixable, eco_codes, groups)
+    match = [r for r in rows
+             if r[0].endswith("5966411600000001")
+             and r[3] == "CL:0000202" and r[4] == "part of"
+             and r[5] == "EMAPA:17597"]
+    assert match, "expected the CL:0000202 -part of-> EMAPA:17597 nested row"
+    assert match[0][6] == "Yes"  # Fixable column
+
+    assert any(b == "nested_bp_extensions" for (b, _) in bucket_hits)
+
+
+def test_main_callable(builder, tmp_path, monkeypatch):
+    """gocam_ttl.main() runs end-to-end on a single model and writes a TSV with
+    a header row to --report-file."""
+    out = tmp_path / "stats.tsv"
+    monkeypatch.setattr("gocam_unwinder.gocam_ttl.GoCamGraphBuilder",
+                        lambda *a, **k: builder)
+    monkeypatch.setattr(sys, "argv", [
+        "gocam_ttl.py", "-m", "resources/test/MGI_MGI_1100089.ttl",
+        "-o", "target/go_20250601.json",
+        "-r", "resources/test/ro_20250723.owl",
+        "--no-label-api", "--report-file", str(out),
+    ])
+
+    gocam_ttl.main()
+
+    lines = out.read_text().splitlines()
+    assert lines, "report file should have content"
+    assert lines[0].split("\t")[0] == "Model ID"
+
+
+def test_report_file_extended_by_default(builder, tmp_path, monkeypatch):
+    """--report-file writes the extended header by default."""
+    out = tmp_path / "stats.tsv"
+    monkeypatch.setattr("gocam_unwinder.gocam_ttl.GoCamGraphBuilder",
+                        lambda *a, **k: builder)
+    monkeypatch.setattr(sys, "argv", [
+        "gocam_ttl.py", "-m", "resources/test/MGI_MGI_1100089.ttl",
+        "-o", "target/go_20250601.json",
+        "-r", "resources/test/ro_20250723.owl",
+        "--no-label-api", "--report-file", str(out),
+    ])
+
+    gocam_ttl.main()
+
+    header = out.read_text().splitlines()[0].split("\t")
+    assert header == ModelStats.extended_header()
+
+
+def test_report_file_basic_with_flag(builder, tmp_path, monkeypatch):
+    """--basic-report switches --report-file back to the base header."""
+    out = tmp_path / "stats.tsv"
+    monkeypatch.setattr("gocam_unwinder.gocam_ttl.GoCamGraphBuilder",
+                        lambda *a, **k: builder)
+    monkeypatch.setattr(sys, "argv", [
+        "gocam_ttl.py", "-m", "resources/test/MGI_MGI_1100089.ttl",
+        "-o", "target/go_20250601.json",
+        "-r", "resources/test/ro_20250723.owl",
+        "--no-label-api", "--basic-report", "--report-file", str(out),
+    ])
+
+    gocam_ttl.main()
+
+    header = out.read_text().splitlines()[0].split("\t")
+    assert header == ModelStats.base_header()
+
+
 def _read_remainders_tsv(path):
     """Parse a remainders TSV into (header_list, list_of_row_dicts)."""
     with open(path) as f:
@@ -1880,20 +1949,20 @@ def test_remainders_report_fixable_column(builder, tmp_path, monkeypatch):
     out = tmp_path / "remainders.tsv"
 
     # Reuse the session-scoped builder (skip re-parsing the GO ontology) while
-    # still exercising main()'s full report-writing path. main() looks up
-    # GoCamGraphBuilder as a module global, so patching the module attribute
+    # still exercising gocam_ttl.main()'s full report-writing path. main() looks
+    # up GoCamGraphBuilder as a module global, so patching the module attribute
     # makes it return our shared builder regardless of the constructor args.
-    monkeypatch.setattr(debug_non_standard, "GoCamGraphBuilder",
+    monkeypatch.setattr("gocam_unwinder.gocam_ttl.GoCamGraphBuilder",
                         lambda *a, **k: builder)
     monkeypatch.setattr(sys, "argv", [
-        "debug_non_standard.py", "resources/test/",
+        "gocam_ttl.py", "-d", "resources/test/",
         "-o", "target/go_20250601.json",
         "-r", "resources/test/ro_20250723.owl",
         "--no-label-api",
-        "--tsv-output", str(out),
+        "--remainders-report", str(out),
     ])
 
-    debug_non_standard.main()
+    gocam_ttl.main()
 
     header, rows = _read_remainders_tsv(str(out))
 

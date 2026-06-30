@@ -38,8 +38,6 @@ REPORT_FILE := $(TARGET_DIR)/noctua_models_graph_counts_$(DATE).tsv
 CRITERIA_FAIL_REPORT := $(TARGET_DIR)/models_split_criteria_failures_$(DATE).tsv
 DATE_CHANGE_REPORT := $(TARGET_DIR)/date_changes_$(DATE).tsv
 NON_STD_REPORT := $(TARGET_DIR)/remainders_report_$(DATE).tsv
-NON_STD_LOG := $(TARGET_DIR)/remainders_report_$(DATE).log
-NON_STD_STATS_REPORT := $(TARGET_DIR)/noctua_models_graph_counts_extended_$(DATE).tsv
 MODELS_NESTED_FIXED := $(TARGET_DIR)/models_nested_fixed
 NESTED_FIX_REPORT := $(TARGET_DIR)/nested_fixes_$(DATE).tsv
 NESTED_FIX_LOG := $(TARGET_DIR)/nested_fixes_$(DATE).log
@@ -99,6 +97,7 @@ $(MODELS_SPLIT): $(GO_ONTOLOGY) $(RO_ONTOLOGY) $(GROUPS_YAML)
 		--output-dir $(MODELS_SPLIT) \
 		--report-file $(REPORT_FILE) \
 		--criteria-fail-report $(CRITERIA_FAIL_REPORT) \
+		--remainders-report $(NON_STD_REPORT) \
 		--date-change-report $(DATE_CHANGE_REPORT) \
 		| tee $(TARGET_DIR)/gocam_ttl.log
 	touch $@
@@ -170,22 +169,11 @@ $(GPAD_DIFF): $(GPAD_PROD) $(GPAD_DEV)
 	diff $(GPAD_PROD) $(GPAD_DEV) > $@ || true
 	@echo "GPAD diff written to $@"
 
-$(NON_STD_REPORT): $(GO_ONTOLOGY) $(RO_ONTOLOGY) $(GROUPS_YAML)
-	mkdir -p $(TARGET_DIR)
-	set -o pipefail; python3 debug_non_standard.py \
-		$(MODELS_DIR) \
-		-o $(GO_ONTOLOGY) \
-		-r $(RO_ONTOLOGY) \
-		--skip-prefix SYNGO \
-		--skip-prefix R-HSA \
-		--skip-prefix YeastPathways \
-		$(if $(SKIP_LIST),--skip-file $(SKIP_LIST),) \
-		--groups-yaml $(GROUPS_YAML) \
-		--tsv-output $@ \
-		--stats-output $(NON_STD_STATS_REPORT) | tee $(NON_STD_LOG)
-
+# Remainders + extended stats are now emitted by the single $(MODELS_SPLIT) run
+# (gocam_ttl.py --remainders-report). `non_std` is kept as a convenience alias.
 .PHONY: non_std
-non_std: $(NON_STD_REPORT)
+non_std: $(MODELS_SPLIT)
+	@echo "Remainders report written to $(NON_STD_REPORT)"
 
 # Fix nested anatomy extensions: de-nest anatomy targets onto the annotation's
 # primary term. This is an INDEPENDENT transformation of the source models -- it
@@ -193,6 +181,9 @@ non_std: $(NON_STD_REPORT)
 # models to its own output dir, so it never conflicts with `models_split`. The CLI
 # forbids combining --fix-nested-anatomy with --split-evidence in one invocation;
 # run this target separately from the split pipeline.
+# NOTE: REPORT_FILE, CRITERIA_FAIL_REPORT, and NON_STD_REPORT are also written here,
+# but they are computed BEFORE any mutation so their content is byte-identical to
+# what models_split produces -- re-running safely overwrites with identical content.
 $(MODELS_NESTED_FIXED): $(GO_ONTOLOGY) $(RO_ONTOLOGY) $(GROUPS_YAML)
 	mkdir -p $(MODELS_NESTED_FIXED)
 	set -o pipefail; python3 src/gocam_unwinder/gocam_ttl.py \
@@ -207,6 +198,9 @@ $(MODELS_NESTED_FIXED): $(GO_ONTOLOGY) $(RO_ONTOLOGY) $(GROUPS_YAML)
 		--fix-nested-anatomy \
 		--output-dir $(MODELS_NESTED_FIXED) \
 		--nested-fix-report $(NESTED_FIX_REPORT) \
+		--report-file $(REPORT_FILE) \
+		--criteria-fail-report $(CRITERIA_FAIL_REPORT) \
+		--remainders-report $(NON_STD_REPORT) \
 		| tee $(NESTED_FIX_LOG)
 	touch $@
 
@@ -214,7 +208,7 @@ $(MODELS_NESTED_FIXED): $(GO_ONTOLOGY) $(RO_ONTOLOGY) $(GROUPS_YAML)
 fix_nested_anatomy: $(MODELS_NESTED_FIXED)
 	@echo "Nested anatomy fixes written to $(MODELS_NESTED_FIXED)/ (report: $(NESTED_FIX_REPORT))"
 
-# Publish whichever of the three reports exist in $(TARGET_DIR) to Google Drive as
+# Publish whichever of the four reports exist in $(TARGET_DIR) to Google Drive as
 # Sheets via tsv2sheet. Push-only: does not build the reports. Missing reports are
 # skipped; a failed upload aborts. Use DATE=YYYYMMDD to target a specific run's folder.
 .PHONY: push-reports
@@ -231,7 +225,6 @@ push-reports:
 	push "$(REPORT_FILE)" "Standard annotation model stats $(DATE)"; \
 	push "$(CRITERIA_FAIL_REPORT)" "Standard annotation criteria failures $(DATE)"; \
 	push "$(NON_STD_REPORT)" "Non-standard annotation remainders $(DATE)"; \
-	push "$(NON_STD_STATS_REPORT)" "Extended model stats $(DATE)"; \
 	push "$(NESTED_FIX_REPORT)" "Nested anatomical extensions fixed $(DATE)"
 
 # Clean up generated files

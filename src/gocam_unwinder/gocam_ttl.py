@@ -21,7 +21,10 @@ parser.add_argument('-r', '--ro_filename', help="RO ontology filename (OWL forma
 parser.add_argument('--split-evidence', action='store_true', help="Split multi-evidence edges into separate edges")
 parser.add_argument('--output-dir', help="Output directory for split evidence files")
 parser.add_argument('--report-file', help="Output file for statistics report (TSV format). If not specified, output goes to stdout.")
+parser.add_argument('--basic-report', action='store_true',
+                    help="Write the basic 11-column stats report instead of the default extended report")
 parser.add_argument('--criteria-fail-report', help="Output file for standard annotation criteria failure report (TSV format).")
+parser.add_argument('--remainders-report', help="Output TSV file for the bucketed remainders report (non-standard / nested-extension triage)")
 parser.add_argument('--skip-prefix', action='append', dest='skip_prefixes', metavar='PREFIX',
                     help="Skip files starting with PREFIX (can be specified multiple times, e.g., --skip-prefix SYNGO --skip-prefix R-HSA)")
 parser.add_argument('--skip-file', dest='skip_file', metavar='FILE',
@@ -196,8 +199,10 @@ NESTING_ATTRIBUTABLE_CHECKS = frozenset({
 
 @dataclass
 class ModelStats:
-    """Per-model statistics. Base fields reproduce the --report-file columns
-    exactly; extended fields back the debug_non_standard.py stats report.
+    """Per-model statistics. Base fields reproduce the base --report-file columns
+    exactly; extended fields back the extended --report-file output (the default
+    unless --basic-report is passed). The bucketed --remainders-report is built
+    separately in remainders_report.py and does not use this class.
 
     Exception: std_multi_evidence_count is an internal driving field (it gates
     --split-evidence), not a report column, so it is not emitted by to_base_row.
@@ -1809,7 +1814,7 @@ class GoCamGraphBuilder:
             print("\t".join(r), file=report_file)
 
 
-if __name__ == "__main__":
+def main():
     args = parser.parse_args()
 
     # These are independent transformations of the source models and must not share
@@ -1854,8 +1859,10 @@ if __name__ == "__main__":
     else:
         output = sys.stdout
 
-    # Always print statistics header
-    print("\t".join(ModelStats.base_header()), file=output)
+    # Statistics report: extended by default, base columns with --basic-report.
+    extended = not args.basic_report
+    stats_header = ModelStats.extended_header() if extended else ModelStats.base_header()
+    print("\t".join(stats_header), file=output)
 
     fail_report_file = None
     criteria_fail_output = None
@@ -1871,6 +1878,14 @@ if __name__ == "__main__":
     all_date_change_records = []
     all_nested_fix_records = []
 
+    # Remainders report accumulators. Imported here (not at module top) to avoid
+    # an import cycle: remainders_report imports find_nested_extensions from this
+    # module, which is only fully defined once this module finishes loading.
+    from gocam_unwinder import remainders_report
+    remainders_rows = []
+    remainders_bucket_hits = []
+    total_non_std = 0
+
     for f in model_files:
         gocam_graph = go_cam_graph_builder.parse_ttl(f)
 
@@ -1881,16 +1896,24 @@ if __name__ == "__main__":
         filename = os.path.basename(f)
         model_id = filename.split(".")[0]
 
-        # Compute per-model statistics (base fields only for the frozen report)
+        # Compute per-model statistics (extended fields unless --basic-report)
         stats = go_cam_graph_builder.compute_model_stats(
-            gocam_graph, "gomodel:" + model_id)
+            gocam_graph, "gomodel:" + model_id, extended=extended)
 
         if criteria_fail_output:
             # print standard annotation fail_checks by edge
             go_cam_graph_builder.print_non_standard_annotation_failed_checks(
                 gocam_graph, report_file=criteria_fail_output)
 
-        print("\t".join(stats.to_base_row()), file=output)
+        row = stats.to_extended_row() if extended else stats.to_base_row()
+        print("\t".join(row), file=output)
+
+        if args.remainders_report:
+            rows, hits = remainders_report.collect_model_remainders(
+                go_cam_graph_builder, gocam_graph)
+            remainders_rows.extend(rows)
+            remainders_bucket_hits.extend(hits)
+            total_non_std += len(gocam_graph.non_standard_annotations)
 
         # Split evidence if requested and model contains standard annotations having multiple evidence edges
         if args.split_evidence and stats.std_multi_evidence_count >= 1:
@@ -1920,6 +1943,13 @@ if __name__ == "__main__":
                     fix_output_filename = os.path.splitext(f)[0] + "_nested_fixed.ttl"
                 gocam_graph.write_ttl(fix_output_filename)
                 print(f"Fixed nested anatomy for {filename} -> {fix_output_filename} ({len(nested_plan)} edges)")
+
+    # Write remainders report if requested
+    if args.remainders_report:
+        remainders_report.write_remainders_tsv(args.remainders_report, remainders_rows)
+        remainders_report.print_bucket_summary(remainders_bucket_hits, total_non_std)
+        print(f"\nRemainders report written to {args.remainders_report} "
+              f"({len(remainders_rows)} rows)")
 
     # Write date change report if requested
     if args.date_change_report and all_date_change_records:
@@ -1956,3 +1986,7 @@ if __name__ == "__main__":
 
     if fail_report_file:
         fail_report_file.close()
+
+
+if __name__ == "__main__":
+    main()
