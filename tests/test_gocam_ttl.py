@@ -1654,6 +1654,35 @@ def test_plan_nested_anatomy_fixes_cc(builder):
     assert str(r["target_type"]) == "http://purl.obolibrary.org/obo/EMAPA_17597"
 
 
+def test_plan_nested_anatomy_fixes_chain_start_differs_from_primary(builder):
+    """5fb9cc0600000760: BP-led, but the nested `mvb -part_of-> late endosome`
+    edge's extension chain departs from the ROOT MF, not the BP primary. The one
+    planned rewrite re-points onto the root MF (...761) with occurs_in, NOT onto
+    the lead-aspect BP primary (...764)."""
+    gocam = builder.parse_ttl("resources/test/5fb9cc0600000760.ttl")
+    plan = builder.plan_nested_anatomy_fixes(gocam)
+
+    assert len(plan) == 1, f"Expected 1 rewrite, got {len(plan)}"
+    r = plan[0]
+    assert r["lead_aspect"] == "BP"
+    assert str(r["old_source_uri"]) == \
+        "http://model.geneontology.org/5fb9cc0600000760/5fb9cc0600000766"  # mvb
+    assert str(r["target_uri"]) == \
+        "http://model.geneontology.org/5fb9cc0600000760/5fb9cc0600000768"  # late endosome
+    assert str(r["new_source_uri"]) == \
+        "http://model.geneontology.org/5fb9cc0600000760/5fb9cc0600000761"  # root MF
+    assert str(r["new_property_uri"]) == OCCURS_IN
+    assert str(r["new_source_type"]) == "http://purl.obolibrary.org/obo/GO_0003674"
+
+    # The chain start is NOT the lead-aspect (BP) primary individual.
+    annot = _annotation_with_individual(
+        gocam, rdflib.term.URIRef(r["new_source_uri"]))
+    bp_primary = builder.get_primary_individuals(annot)["BP"][0]
+    assert str(bp_primary) == \
+        "http://model.geneontology.org/5fb9cc0600000760/5fb9cc0600000764"
+    assert r["new_source_uri"] != bp_primary
+
+
 def test_plan_nested_anatomy_fixes_warn_param(builder):
     """plan_nested_anatomy_fixes accepts warn=False and returns the same plan
     as the default call (the flag only gates warning output, not results)."""
@@ -1662,6 +1691,49 @@ def test_plan_nested_anatomy_fixes_warn_param(builder):
     quiet_plan = builder.plan_nested_anatomy_fixes(gocam_graph, warn=False)
     assert [r["bnode_id"] for r in quiet_plan] == [r["bnode_id"] for r in default_plan]
     assert len(quiet_plan) == 1
+
+
+def test_extension_chain_start(builder):
+    """_extension_chain_start walks back to the backbone individual where the
+    extension chain departs, inheriting the relation of the edge that leaves it.
+
+    5fb9cc0600000760 (BP-led): the nested `mvb -part_of-> late endosome` chain
+    departs from the ROOT MF (...761), NOT the lead-aspect BP primary (...764),
+    via occurs_in.
+
+    cc_nested_anatomy_example (CC-led): the chain departs from the CC individual
+    (cc1), NOT the GP, via part_of -- the case a boundary-edge definition gets
+    wrong because the CC is itself anatomical.
+    """
+    # BP-led, chain start != lead primary
+    gocam = builder.parse_ttl("resources/test/5fb9cc0600000760.ttl")
+    mvb = rdflib.term.URIRef(
+        "http://model.geneontology.org/5fb9cc0600000760/5fb9cc0600000766")
+    annot = _annotation_with_individual(gocam, mvb)
+    assert annot is not None
+    nested = next(e for e in annot.edges.values()
+                  if str(e.source_type) == "http://purl.obolibrary.org/obo/GO_0005771"
+                  and str(e.target_type) == "http://purl.obolibrary.org/obo/GO_0005770")
+    start = builder._extension_chain_start(annot, nested)
+    assert start is not None
+    start_uri, start_type, relation = start
+    assert str(start_uri) == \
+        "http://model.geneontology.org/5fb9cc0600000760/5fb9cc0600000761"
+    assert str(start_type) == "http://purl.obolibrary.org/obo/GO_0003674"
+    assert str(relation) == OCCURS_IN
+
+    # CC-led, chain start is the CC (cc1), NOT the GP
+    cc = builder.parse_ttl("resources/test/cc_nested_anatomy_example.ttl")
+    cc_annot = (cc.standard_annotations + cc.non_standard_annotations)[0]
+    nested_cc = next(
+        e for e in cc_annot.edges.values()
+        if str(e.source_type) == "http://purl.obolibrary.org/obo/CL_0000202"
+        and str(e.target_type) == "http://purl.obolibrary.org/obo/EMAPA_17597")
+    start_cc = builder._extension_chain_start(cc_annot, nested_cc)
+    assert start_cc is not None
+    assert str(start_cc[0]) == \
+        "http://model.geneontology.org/cc_nested_anatomy_example/cc1"
+    assert str(start_cc[2]) == PART_OF
 
 
 def test_model_stats_base_header():
@@ -1918,6 +1990,45 @@ def test_report_file_basic_with_flag(builder, tmp_path, monkeypatch):
     assert header == ModelStats.base_header()
 
 
+def test_nested_fix_report_has_new_source_column(builder, tmp_path, monkeypatch):
+    """--nested-fix-report gains a `New Source` column between Target and New
+    Relation. For 5fb9cc0600000760 the New Source is the root MF's term
+    (GO:0003674), distinct from the Primary Term (axis elongation, GO:0003401).
+    Expected label strings are resolved via the builder so the test is immune to
+    underscore-vs-space label rendering."""
+    report = tmp_path / "nested_fixes.tsv"
+    outdir = tmp_path / "out"
+    monkeypatch.setattr("gocam_unwinder.gocam_ttl.GoCamGraphBuilder",
+                        lambda *a, **k: builder)
+    monkeypatch.setattr(sys, "argv", [
+        "gocam_ttl.py", "-m", "resources/test/5fb9cc0600000760.ttl",
+        "-o", "target/go_20250601.json",
+        "-r", "resources/test/ro_20250723.owl",
+        "--no-label-api",
+        "--fix-nested-anatomy",
+        "--output-dir", str(outdir),
+        "--nested-fix-report", str(report),
+    ])
+
+    gocam_ttl.main()
+
+    lines = [ln.rstrip("\n") for ln in report.read_text().splitlines() if ln.strip()]
+    header = lines[0].split("\t")
+    assert header == ["Model ID", "Title", "Lead Aspect", "Primary Term",
+                      "Old Source", "Old Relation", "Target",
+                      "New Source", "New Relation"]
+    row = dict(zip(header, lines[1].split("\t")))
+    root_mf_label = builder.term_label(
+        rdflib.term.URIRef("http://purl.obolibrary.org/obo/GO_0003674"))
+    axis_label = builder.term_label(
+        rdflib.term.URIRef("http://purl.obolibrary.org/obo/GO_0003401"))
+    occurs_in_label = builder.term_label(rdflib.term.URIRef(OCCURS_IN))
+    assert row["New Source"] == root_mf_label       # root MF, the chain start
+    assert row["New Relation"] == occurs_in_label   # BFO:0000066
+    assert row["Primary Term"] == axis_label        # GO:0003401, still context
+    assert row["New Source"] != row["Primary Term"]
+
+
 def _read_remainders_tsv(path):
     """Parse a remainders TSV into (header_list, list_of_row_dicts)."""
     with open(path) as f:
@@ -1993,6 +2104,13 @@ def test_remainders_report_fixable_column(builder, tmp_path, monkeypatch):
     complex_row = _find_remainders_row(
         rows, "5745387b00001376", "UBERON:0000965", "part of", "UBERON:0000019")
     assert complex_row["Fixable"] == "No"
+
+    # New: chain-start != lead primary. 5fb9cc0600000760's nested
+    # `multivesicular body -part of-> late endosome` is fixable (re-pointed onto
+    # the root MF); its remainders row reads Fixable=Yes.
+    chain_row = _find_remainders_row(
+        rows, "5fb9cc0600000760", "multivesicular body", "part of", "late endosome")
+    assert chain_row["Fixable"] == "Yes"
 
 
 def test_relation_fixtures_keep_one_standard_annotation(builder):

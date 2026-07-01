@@ -599,8 +599,10 @@ class GoCamGraph:
 
         Used to de-nest an anatomy extension: the nested edge
         (old_source -old_property-> target) becomes
-        (new_source -new_property-> target), where new_source is the annotation's
-        primary individual. annotatedTarget, evidence, dates, and contributors on
+        (new_source -new_property-> target), where new_source is the
+        extension-chain-start individual chosen by plan_nested_anatomy_fixes (the
+        backbone individual where the extension chain departs -- not necessarily the
+        lead-aspect primary). annotatedTarget, evidence, dates, and contributors on
         the axiom bnode are left untouched. The axiom bnode is updated only if it
         exists (defensive — a bare assertion may never have been reified).
         """
@@ -1379,6 +1381,47 @@ class GoCamGraphBuilder:
         # 4. Simple iff every region has at most one boundary edge.
         return all(len(edges) <= 1 for edges in boundary.values())
 
+    def _extension_chain_start(self, annot: StandardAnnotation,
+                               edge: StandardAnnotationEdge):
+        """
+        Walk the extension chain backwards from `edge.source_uri` to the backbone
+        individual where the chain departs from the backbone.
+
+        A backbone individual is any endpoint of a backbone edge (_backbone_role
+        is not None). The relation returned is the property of the *direct
+        extension edge* -- the edge that leaves the backbone individual toward the
+        chain (the last edge the walk traverses).
+
+        Returns (start_uri, start_type, relation_uri) on success, or None when the
+        chain start is ambiguous: a traversed node has != 1 extension-edge
+        predecessor, a cycle is hit, or no backbone individual is reached.
+        """
+        extension_edges = self.get_extension_edges(annot)
+        backbone_individuals = set()
+        uri_to_type = {}
+        for e in annot.edges.values():
+            uri_to_type[e.source_uri] = e.source_type
+            uri_to_type[e.target_uri] = e.target_type
+            if self._backbone_role(e) is not None:
+                backbone_individuals.add(e.source_uri)
+                backbone_individuals.add(e.target_uri)
+
+        current = edge.source_uri
+        relation = None
+        visited = set()
+        while current not in backbone_individuals:
+            if current in visited:
+                return None  # cycle
+            visited.add(current)
+            preds = [e for e in extension_edges if e.target_uri == current]
+            if len(preds) != 1:
+                return None  # ambiguous / dead-end
+            relation = preds[0].property_uri
+            current = preds[0].source_uri
+        if relation is None:
+            return None  # edge.source_uri was already a backbone node
+        return current, uri_to_type.get(current), relation
+
     def plan_nested_anatomy_fixes(self, gocam: GoCamGraph, warn: bool = True) -> list:
         """
         Build a list of rewrite instructions for nested anatomy extension edges.
@@ -1386,16 +1429,19 @@ class GoCamGraphBuilder:
         For every annotation (standard and non-standard), find extension edges
         whose source is not the lead-aspect primary term (nested) and whose source
         and target types are both anatomical structures (_is_anatomical_structure),
-        and plan to re-point each onto the annotation's primary individual. The
-        relation becomes occurs_in for MF/BP-led annotations, or is kept as-is
-        (typically part_of) for CC-led annotations.
+        and plan to re-point each onto the extension-start individual (the backbone
+        individual where the extension chain departs). The new relation is inherited
+        from the direct extension edge that leaves that backbone individual (via
+        _extension_chain_start) -- typically occurs_in for MF/BP-led annotations and
+        part_of for CC-led ones, but whatever that edge actually uses.
 
         Annotations whose lead aspect has 0 or >1 primary individual are skipped
         with a warning (ambiguous attach point).
 
         Returns a list of instruction dicts with keys: model_id, title,
         lead_aspect, primary_term, bnode_id, old_source_uri, old_property_uri,
-        target_uri, new_source_uri, new_property_uri, old_source_type, target_type.
+        target_uri, new_source_uri, new_property_uri, new_source_type,
+        old_source_type, target_type.
         """
         plan = []
         all_annots = gocam.standard_annotations + gocam.non_standard_annotations
@@ -1416,7 +1462,6 @@ class GoCamGraphBuilder:
                           f"({gocam.title}) — expected 1 primary {lead} individual, "
                           f"found {len(primary_individuals)}")
                 continue
-            primary_individual = primary_individuals[0]
             # `lead` came from find_nested_extensions -> pick_lead_aspect over
             # get_primary_go_terms, so it is guaranteed to be a present key here.
             primary_term = self.get_primary_go_terms(annot)[lead][0]
@@ -1424,10 +1469,16 @@ class GoCamGraphBuilder:
                 if not (self._is_anatomical_structure(edge.source_type)
                         and self._is_anatomical_structure(edge.target_type)):
                     continue
-                if lead in ("MF", "BP"):
-                    new_property = self.rel_occurs_in
-                else:
-                    new_property = edge.property_uri  # CC-led keeps the relation
+                # Re-point onto the backbone individual where this extension chain
+                # departs (the "extension starting individual"), inheriting the
+                # relation of the edge leaving it -- NOT the lead-aspect primary.
+                start = self._extension_chain_start(annot, edge)
+                if start is None:
+                    if warn:
+                        print(f"WARNING: skipping nested edge in {gocam.model_id} "
+                              f"({gocam.title}) — ambiguous extension chain start")
+                    continue
+                new_source_uri, new_source_type, new_property = start
                 plan.append({
                     "model_id": gocam.model_id,
                     "title": gocam.title,
@@ -1437,8 +1488,9 @@ class GoCamGraphBuilder:
                     "old_source_uri": edge.source_uri,
                     "old_property_uri": edge.property_uri,
                     "target_uri": edge.target_uri,
-                    "new_source_uri": primary_individual,
+                    "new_source_uri": new_source_uri,
                     "new_property_uri": new_property,
+                    "new_source_type": new_source_type,
                     "old_source_type": edge.source_type,
                     "target_type": edge.target_type,
                 })
@@ -1968,16 +2020,19 @@ def main():
     if args.nested_fix_report and all_nested_fix_records:
         with open(args.nested_fix_report, 'w') as nfr_file:
             nfr_headers = ["Model ID", "Title", "Lead Aspect", "Primary Term",
-                           "Old Source", "Old Relation", "Target", "New Relation"]
+                           "Old Source", "Old Relation", "Target",
+                           "New Source", "New Relation"]
             print("\t".join(nfr_headers), file=nfr_file)
             for rec in all_nested_fix_records:
                 primary_label = go_cam_graph_builder.term_label(rec["primary_term"]) if rec["primary_term"] else ""
                 old_source_label = go_cam_graph_builder.term_label(rec["old_source_type"]) if rec["old_source_type"] else ""
                 old_rel_label = go_cam_graph_builder.term_label(rec["old_property_uri"]) if rec["old_property_uri"] else ""
                 target_label = go_cam_graph_builder.term_label(rec["target_type"]) if rec["target_type"] else ""
+                new_source_label = go_cam_graph_builder.term_label(rec["new_source_type"]) if rec.get("new_source_type") else ""
                 new_rel_label = go_cam_graph_builder.term_label(rec["new_property_uri"]) if rec["new_property_uri"] else ""
                 cols = [rec["model_id"], rec["title"], rec["lead_aspect"], primary_label,
-                        old_source_label, old_rel_label, target_label, new_rel_label]
+                        old_source_label, old_rel_label, target_label,
+                        new_source_label, new_rel_label]
                 print("\t".join(cols), file=nfr_file)
 
     # Close report file if it was opened
