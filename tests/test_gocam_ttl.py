@@ -2016,13 +2016,14 @@ def test_nested_fix_report_has_new_source_column(builder, tmp_path, monkeypatch)
     header = lines[0].split("\t")
     assert header == ["Model ID", "Title", "Lead Aspect", "Primary Term",
                       "Old Source", "Old Relation", "Target",
-                      "New Source", "New Relation"]
+                      "New Source", "New Relation", "Action"]
     row = dict(zip(header, lines[1].split("\t")))
     root_mf_label = builder.term_label(
         rdflib.term.URIRef("http://purl.obolibrary.org/obo/GO_0003674"))
     axis_label = builder.term_label(
         rdflib.term.URIRef("http://purl.obolibrary.org/obo/GO_0003401"))
     occurs_in_label = builder.term_label(rdflib.term.URIRef(OCCURS_IN))
+    assert row["Action"] == "rewrite"               # re-pointable chain
     assert row["New Source"] == root_mf_label       # root MF, the chain start
     assert row["New Relation"] == occurs_in_label   # BFO:0000066
     assert row["Primary Term"] == axis_label        # GO:0003401, still context
@@ -2208,3 +2209,140 @@ def test_plan_nested_anatomy_fixes_skips_multi_boundary(builder):
 
     simple = builder.parse_ttl("resources/test/5966411600000001.ttl")
     assert len(builder.plan_nested_anatomy_fixes(simple, warn=False)) == 1
+
+
+# ---------------------------------------------------------------------------
+# Deletion of non-re-pointable nested anatomy edges (5c4605cc00000891)
+# ---------------------------------------------------------------------------
+
+MODEL_5C46_NS = "http://model.geneontology.org/5c4605cc00000891/"
+RESULTS_IN_SPECIFICATION_OF = "http://purl.obolibrary.org/obo/RO_0002356"
+ZFA_0009204 = "http://purl.obolibrary.org/obo/ZFA_0009204"
+
+
+def test_plan_nested_anatomy_fixes_deletes_disallowed_start_relation(builder):
+    """5c4605cc00000891 (ZFIN): each of the four subgraphs has a both-anatomical
+    nested `ZFA -part_of-> ZFA` edge whose extension chain departs the backbone via
+    `results_in_specification_of` (RO:0002356) -- NOT occurs_in/part_of/is_active_in.
+    Such chains are not re-pointable, so the planner marks each edge for DELETION
+    (action="delete", no new source/relation) rather than rewriting it into a wrong
+    `results_in_specification_of` edge."""
+    gocam = builder.parse_ttl("resources/test/5c4605cc00000891.ttl")
+    plan = builder.plan_nested_anatomy_fixes(gocam, warn=False)
+
+    assert len(plan) == 4, f"expected 4 delete instructions, got {len(plan)}"
+    for r in plan:
+        assert r["action"] == "delete"
+        assert r["new_source_uri"] is None
+        assert r["new_property_uri"] is None
+        assert str(r["old_property_uri"]) == PART_OF
+        assert builder._is_anatomical_structure(r["old_source_type"])
+        assert builder._is_anatomical_structure(r["target_type"])
+
+    deleted = {(str(r["old_source_uri"]), str(r["target_uri"])) for r in plan}
+    assert deleted == {
+        (MODEL_5C46_NS + "5c4605cc00000902", MODEL_5C46_NS + "5c4605cc00000903"),
+        (MODEL_5C46_NS + "5c4605cc00000915", MODEL_5C46_NS + "5c4605cc00000914"),
+        (MODEL_5C46_NS + "5c4605cc00000904", MODEL_5C46_NS + "5c4605cc00000907"),
+        (MODEL_5C46_NS + "5c4605cc00000905", MODEL_5C46_NS + "5c4605cc00000906"),
+    }
+
+
+def test_delete_edge_removes_assertion_axiom_and_prunes_orphan(builder):
+    """GoCamGraph.delete_edge removes the assertion triple and the reified
+    owl:Axiom bnode, and RETURNS the evidence individuals that axiom referenced.
+    prune_orphan_individuals then drops the orphaned target AND the (now dangling)
+    evidence individual, while leaving the still-referenced source individual
+    (kept by the direct results_in_specification_of extension) and that extension
+    edge intact."""
+    gocam = builder.parse_ttl("resources/test/5c4605cc00000891.ttl")
+    part_of = rdflib.term.URIRef(PART_OF)
+    ris = rdflib.term.URIRef(RESULTS_IN_SPECIFICATION_OF)
+    src = rdflib.term.URIRef(MODEL_5C46_NS + "5c4605cc00000902")   # ZFA:0009204
+    tgt = rdflib.term.URIRef(MODEL_5C46_NS + "5c4605cc00000903")   # ZFA:0005580, orphan-to-be
+    ev = rdflib.term.URIRef(MODEL_5C46_NS + "5c4605cc00000917")    # ECO evidence node
+    cell_fate = rdflib.term.URIRef(MODEL_5C46_NS + "5fce9b7300001956")
+
+    edge = None
+    for annot in gocam.standard_annotations + gocam.non_standard_annotations:
+        for e in annot.edges.values():
+            if (e.source_uri == src and e.target_uri == tgt
+                    and e.property_uri == part_of):
+                edge = e
+                break
+    assert edge is not None, "expected the nested 902 -part_of-> 903 edge"
+    axiom_bnode = rdflib.term.BNode(edge.bnode_id)
+    g = gocam.g
+    assert (src, part_of, tgt) in g
+    assert (axiom_bnode, rdflib.namespace.OWL.annotatedTarget, tgt) in g
+    assert list(g.predicate_objects(ev))            # evidence node present
+    assert (cell_fate, ris, src) in g
+
+    removed_ev = gocam.delete_edge(edge.bnode_id, src, part_of, tgt)
+    assert ev in removed_ev, "delete_edge should return the axiom's evidence individuals"
+    pruned = gocam.prune_orphan_individuals([src, tgt] + list(removed_ev))
+
+    # Assertion + entire reified axiom gone.
+    assert (src, part_of, tgt) not in g
+    assert list(g.predicate_objects(axiom_bnode)) == []
+    # Orphaned target + evidence pruned; still-referenced source kept.
+    assert str(tgt) in pruned
+    assert str(ev) in pruned
+    assert str(src) not in pruned
+    assert list(g.predicate_objects(tgt)) == []
+    assert list(g.predicate_objects(ev)) == []
+    assert (src, rdflib.RDF.type, rdflib.term.URIRef(ZFA_0009204)) in g
+    # Direct extension onto the (kept) source survives.
+    assert (cell_fate, ris, src) in g
+
+
+def test_nested_fix_report_records_deletions(builder, tmp_path, monkeypatch):
+    """End-to-end --fix-nested-anatomy on 5c4605cc00000891: the four
+    non-re-pointable nested edges are reported with Action=delete (blank New
+    Source / New Relation), and the written model has those edges + their
+    orphaned target individuals removed while the direct
+    results_in_specification_of extensions survive."""
+    report = tmp_path / "nested_fixes.tsv"
+    outdir = tmp_path / "out"
+    monkeypatch.setattr("gocam_unwinder.gocam_ttl.GoCamGraphBuilder",
+                        lambda *a, **k: builder)
+    monkeypatch.setattr(sys, "argv", [
+        "gocam_ttl.py", "-m", "resources/test/5c4605cc00000891.ttl",
+        "-o", "target/go_20250601.json",
+        "-r", "resources/test/ro_20250723.owl",
+        "--no-label-api",
+        "--fix-nested-anatomy",
+        "--output-dir", str(outdir),
+        "--nested-fix-report", str(report),
+    ])
+
+    gocam_ttl.main()
+
+    lines = [ln.rstrip("\n") for ln in report.read_text().splitlines() if ln.strip()]
+    header = lines[0].split("\t")
+    assert header[-1] == "Action"
+    rows = [dict(zip(header, ln.split("\t"))) for ln in lines[1:]]
+    delete_rows = [r for r in rows if r["Action"] == "delete"]
+    assert len(delete_rows) == 4
+    for r in delete_rows:
+        assert r["New Source"] == ""
+        assert r["New Relation"] == ""
+
+    out_model = outdir / "5c4605cc00000891.ttl"
+    assert out_model.exists()
+    g = rdflib.Graph()
+    g.parse(str(out_model), format="turtle")
+    part_of = rdflib.term.URIRef(PART_OF)
+    ris = rdflib.term.URIRef(RESULTS_IN_SPECIFICATION_OF)
+    src = rdflib.term.URIRef(MODEL_5C46_NS + "5c4605cc00000902")
+    tgt = rdflib.term.URIRef(MODEL_5C46_NS + "5c4605cc00000903")
+    cell_fate = rdflib.term.URIRef(MODEL_5C46_NS + "5fce9b7300001956")
+    assert (src, part_of, tgt) not in g                 # nested edge deleted
+    assert list(g.predicate_objects(tgt)) == []          # orphan target pruned
+    assert (cell_fate, ris, src) in g                    # direct extension kept
+    assert (src, rdflib.RDF.type, rdflib.term.URIRef(ZFA_0009204)) in g
+    # Evidence individuals of the four deleted nested edges are gone too.
+    for ev_id in ("5c4605cc00000917", "5c4605cc00000927",
+                  "5c4605cc00000920", "5c4605cc00000923"):
+        ev = rdflib.term.URIRef(MODEL_5C46_NS + ev_id)
+        assert list(g.predicate_objects(ev)) == [], f"{ev_id} should be pruned"

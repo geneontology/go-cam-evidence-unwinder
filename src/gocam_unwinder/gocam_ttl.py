@@ -619,6 +619,56 @@ class GoCamGraph:
             self.g.remove((bnode, rdflib.namespace.OWL.annotatedProperty, old_property))
             self.g.add((bnode, rdflib.namespace.OWL.annotatedProperty, new_property))
 
+    def delete_edge(self, bnode_id, source, property, target):
+        """
+        Remove an edge entirely: its assertion triple AND its reified owl:Axiom
+        bnode (dates, contributors and all other axiom triples included).
+
+        Used by the --fix-nested-anatomy mode to drop a nested anatomy extension
+        whose chain cannot be safely re-pointed (the chain departs the backbone via
+        a relation that is not occurs_in/part_of/is_active_in, so inheriting it
+        would fabricate a wrong edge).
+
+        Returns the list of evidence individual URIs the axiom referenced (captured
+        before the bnode is removed). Those, together with the edge's endpoints, are
+        the candidates the caller passes to prune_orphan_individuals() so any
+        evidence node or anatomy individual left dangling by the deletion is removed.
+        """
+        bnode = rdflib.term.BNode(bnode_id)
+        evidence_pred = rdflib.URIRef("http://geneontology.org/lego/evidence")
+        evidence_uris = list(self.g.objects(bnode, evidence_pred))
+        self.g.remove((source, property, target))
+        self.g.remove((bnode, None, None))
+        return evidence_uris
+
+    def _individual_has_edges(self, ind):
+        """True if `ind` (a URIRef) still participates in any GO-CAM edge: it is
+        the object of some remaining triple (an incoming assertion or an axiom's
+        annotatedSource/annotatedTarget/annotatedProperty pointing at it), or it is
+        the subject of an outgoing OBO-namespace relation assertion. Its own
+        declaration triples (rdf:type, layout hints, providedBy, dates) do not
+        count."""
+        obo = "http://purl.obolibrary.org/obo/"
+        for _ in self.g.subjects(None, ind):
+            return True
+        for p in self.g.predicates(ind, None):
+            if str(p).startswith(obo):
+                return True
+        return False
+
+    def prune_orphan_individuals(self, candidate_uris):
+        """Remove every individual in `candidate_uris` that no longer participates
+        in any edge (see _individual_has_edges), deleting all triples with it as
+        subject. Call AFTER all edge deletions so multi-hop chains resolve in one
+        pass. Returns the list of pruned individual URIs (as strings)."""
+        pruned = []
+        for uri in candidate_uris:
+            ind = uri if isinstance(uri, rdflib.term.Identifier) else rdflib.URIRef(uri)
+            if not self._individual_has_edges(ind):
+                self.g.remove((ind, None, None))
+                pruned.append(str(ind))
+        return pruned
+
     def evidence_triples(self):
         evidence_rel = rdflib.URIRef("http://geneontology.org/lego/evidence")
         for triple in self.g.triples((None, evidence_rel, None)):
@@ -1381,20 +1431,22 @@ class GoCamGraphBuilder:
         # 4. Simple iff every region has at most one boundary edge.
         return all(len(edges) <= 1 for edges in boundary.values())
 
-    def _extension_chain_start(self, annot: StandardAnnotation,
-                               edge: StandardAnnotationEdge):
+    def _walk_extension_chain(self, annot: StandardAnnotation,
+                              edge: StandardAnnotationEdge):
         """
         Walk the extension chain backwards from `edge.source_uri` to the backbone
         individual where the chain departs from the backbone.
 
         A backbone individual is any endpoint of a backbone edge (_backbone_role
-        is not None). The relation returned is the property of the *direct
-        extension edge* -- the edge that leaves the backbone individual toward the
-        chain (the last edge the walk traverses).
+        is not None). Returns (start_uri, start_type, relations), where `relations`
+        is the ordered list of property URIs traversed from `edge.source_uri` up to
+        the backbone -- nearest edge first, the *direct extension edge* leaving the
+        backbone last (so relations[-1] is the chain-start relation). The list does
+        NOT include `edge`'s own property (the walk starts at its source).
 
-        Returns (start_uri, start_type, relation_uri) on success, or None when the
-        chain start is ambiguous: a traversed node has != 1 extension-edge
-        predecessor, a cycle is hit, or no backbone individual is reached.
+        Returns None when the chain start is ambiguous: a traversed node has != 1
+        extension-edge predecessor, a cycle is hit, or no backbone individual is
+        reached before running out of predecessors.
         """
         extension_edges = self.get_extension_edges(annot)
         backbone_individuals = set()
@@ -1407,7 +1459,7 @@ class GoCamGraphBuilder:
                 backbone_individuals.add(e.target_uri)
 
         current = edge.source_uri
-        relation = None
+        relations = []
         visited = set()
         while current not in backbone_individuals:
             if current in visited:
@@ -1416,11 +1468,48 @@ class GoCamGraphBuilder:
             preds = [e for e in extension_edges if e.target_uri == current]
             if len(preds) != 1:
                 return None  # ambiguous / dead-end
-            relation = preds[0].property_uri
+            relations.append(preds[0].property_uri)
             current = preds[0].source_uri
-        if relation is None:
+        if not relations:
             return None  # edge.source_uri was already a backbone node
-        return current, uri_to_type.get(current), relation
+        return current, uri_to_type.get(current), relations
+
+    def _extension_chain_start(self, annot: StandardAnnotation,
+                               edge: StandardAnnotationEdge):
+        """
+        Thin wrapper over _walk_extension_chain returning the extension-start
+        individual and the *chain-start relation* (the property of the direct
+        extension edge leaving the backbone). Returns (start_uri, start_type,
+        relation_uri) on success, or None when the chain start is ambiguous.
+        """
+        walk = self._walk_extension_chain(annot, edge)
+        if walk is None:
+            return None
+        start_uri, start_type, relations = walk
+        return start_uri, start_type, relations[-1]
+
+    def _nested_chain_is_repointable(self, edge: StandardAnnotationEdge, relations):
+        """
+        Decide whether a nested anatomy edge's extension chain may be de-nested by
+        *re-pointing* its source (vs. deleted).
+
+        `relations` is the list from _walk_extension_chain (nearest-first, so
+        relations[-1] is the chain-start relation leaving the backbone). A chain is
+        re-pointable iff the chain-start relation is occurs_in, part_of, or
+        is_active_in AND every *other* relation in the chain -- the intermediate
+        hops (relations[:-1]) and the nested edge's own relation -- is part_of.
+
+        Chains that depart via any other relation (e.g. results_in_specification_of)
+        are NOT re-pointable; the caller deletes them instead, because inheriting a
+        non-containment relation onto the de-nested edge would fabricate a wrong
+        assertion.
+        """
+        allowed_start = {str(self.rel_occurs_in), str(self.rel_part_of),
+                         str(self.rel_is_active_in)}
+        if str(relations[-1]) not in allowed_start:
+            return False
+        rest = list(relations[:-1]) + [edge.property_uri]
+        return all(str(r) == str(self.rel_part_of) for r in rest)
 
     def plan_nested_anatomy_fixes(self, gocam: GoCamGraph, warn: bool = True) -> list:
         """
@@ -1428,12 +1517,21 @@ class GoCamGraphBuilder:
 
         For every annotation (standard and non-standard), find extension edges
         whose source is not the lead-aspect primary term (nested) and whose source
-        and target types are both anatomical structures (_is_anatomical_structure),
-        and plan to re-point each onto the extension-start individual (the backbone
-        individual where the extension chain departs). The new relation is inherited
-        from the direct extension edge that leaves that backbone individual (via
-        _extension_chain_start) -- typically occurs_in for MF/BP-led annotations and
-        part_of for CC-led ones, but whatever that edge actually uses.
+        and target types are both anatomical structures (_is_anatomical_structure).
+        Each such edge yields one instruction with an `action`:
+
+        - "rewrite": when the extension chain is re-pointable
+          (_nested_chain_is_repointable) -- its chain-start relation is
+          occurs_in/part_of/is_active_in and every other chain relation is part_of.
+          The edge is re-pointed onto the extension-start individual (the backbone
+          individual where the chain departs), inheriting the chain-start relation
+          (typically occurs_in for MF/BP-led and part_of for CC-led).
+        - "delete": when the chain departs via any other relation (e.g.
+          results_in_specification_of). Re-pointing would fabricate a wrong
+          assertion, so the nested edge is deleted instead (new_source_uri /
+          new_property_uri / new_source_type are None). The caller
+          (GoCamGraph.delete_edge + prune_orphan_individuals) removes the edge and
+          any individual it orphans.
 
         Annotations whose lead aspect has 0 or >1 primary individual are skipped
         with a warning (ambiguous attach point).
@@ -1441,7 +1539,7 @@ class GoCamGraphBuilder:
         Returns a list of instruction dicts with keys: model_id, title,
         lead_aspect, primary_term, bnode_id, old_source_uri, old_property_uri,
         target_uri, new_source_uri, new_property_uri, new_source_type,
-        old_source_type, target_type.
+        old_source_type, target_type, action.
         """
         plan = []
         all_annots = gocam.standard_annotations + gocam.non_standard_annotations
@@ -1469,16 +1567,30 @@ class GoCamGraphBuilder:
                 if not (self._is_anatomical_structure(edge.source_type)
                         and self._is_anatomical_structure(edge.target_type)):
                     continue
-                # Re-point onto the backbone individual where this extension chain
-                # departs (the "extension starting individual"), inheriting the
-                # relation of the edge leaving it -- NOT the lead-aspect primary.
-                start = self._extension_chain_start(annot, edge)
-                if start is None:
+                # Walk the extension chain back to the backbone individual where it
+                # departs (the "extension starting individual").
+                walk = self._walk_extension_chain(annot, edge)
+                if walk is None:
                     if warn:
                         print(f"WARNING: skipping nested edge in {gocam.model_id} "
                               f"({gocam.title}) — ambiguous extension chain start")
                     continue
-                new_source_uri, new_source_type, new_property = start
+                start_uri, start_type, relations = walk
+                if self._nested_chain_is_repointable(edge, relations):
+                    # Re-point onto the extension-start individual, inheriting the
+                    # relation of the edge leaving it -- NOT the lead-aspect primary.
+                    action = "rewrite"
+                    new_source_uri = start_uri
+                    new_source_type = start_type
+                    new_property = relations[-1]
+                else:
+                    # Chain departs via a non-containment relation (e.g.
+                    # results_in_specification_of): cannot re-point safely, so
+                    # delete the nested edge instead.
+                    action = "delete"
+                    new_source_uri = None
+                    new_source_type = None
+                    new_property = None
                 plan.append({
                     "model_id": gocam.model_id,
                     "title": gocam.title,
@@ -1493,6 +1605,7 @@ class GoCamGraphBuilder:
                     "new_source_type": new_source_type,
                     "old_source_type": edge.source_type,
                     "target_type": edge.target_type,
+                    "action": action,
                 })
         return plan
 
@@ -1984,10 +2097,21 @@ def main():
         if args.fix_nested_anatomy:
             nested_plan = go_cam_graph_builder.plan_nested_anatomy_fixes(gocam_graph)
             if nested_plan:
+                orphan_candidates = []
                 for rec in nested_plan:
-                    gocam_graph.rewrite_edge_source_and_relation(
-                        rec["bnode_id"], rec["old_source_uri"], rec["old_property_uri"],
-                        rec["target_uri"], rec["new_source_uri"], rec["new_property_uri"])
+                    if rec.get("action") == "delete":
+                        removed_evidence = gocam_graph.delete_edge(
+                            rec["bnode_id"], rec["old_source_uri"],
+                            rec["old_property_uri"], rec["target_uri"])
+                        orphan_candidates.append(rec["old_source_uri"])
+                        orphan_candidates.append(rec["target_uri"])
+                        orphan_candidates.extend(removed_evidence)
+                    else:
+                        gocam_graph.rewrite_edge_source_and_relation(
+                            rec["bnode_id"], rec["old_source_uri"], rec["old_property_uri"],
+                            rec["target_uri"], rec["new_source_uri"], rec["new_property_uri"])
+                if orphan_candidates:
+                    gocam_graph.prune_orphan_individuals(orphan_candidates)
                 all_nested_fix_records.extend(nested_plan)
                 if args.output_dir:
                     fix_output_filename = os.path.join(args.output_dir, filename)
@@ -2021,7 +2145,7 @@ def main():
         with open(args.nested_fix_report, 'w') as nfr_file:
             nfr_headers = ["Model ID", "Title", "Lead Aspect", "Primary Term",
                            "Old Source", "Old Relation", "Target",
-                           "New Source", "New Relation"]
+                           "New Source", "New Relation", "Action"]
             print("\t".join(nfr_headers), file=nfr_file)
             for rec in all_nested_fix_records:
                 primary_label = go_cam_graph_builder.term_label(rec["primary_term"]) if rec["primary_term"] else ""
@@ -2032,7 +2156,7 @@ def main():
                 new_rel_label = go_cam_graph_builder.term_label(rec["new_property_uri"]) if rec["new_property_uri"] else ""
                 cols = [rec["model_id"], rec["title"], rec["lead_aspect"], primary_label,
                         old_source_label, old_rel_label, target_label,
-                        new_source_label, new_rel_label]
+                        new_source_label, new_rel_label, rec.get("action", "rewrite")]
                 print("\t".join(cols), file=nfr_file)
 
     # Close report file if it was opened
