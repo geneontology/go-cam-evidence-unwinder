@@ -1,0 +1,11 @@
+id: invalid_gp_cc_relation
+phase: unit
+stage: 2
+tsv: 3
+kind: python
+entrypoint: unit_invalid_gp_cc_relation
+inputs: [go, gp_allowlist]
+description: >-
+  A gene product connected to a non-root cellular component must use
+  located_in (RO:0001025).
+enabled: true

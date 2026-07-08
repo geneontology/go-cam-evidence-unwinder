@@ -6,6 +6,22 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 GO-CAM Evidence Unwinder is a Python tool that processes Gene Ontology Causal Activity Models (GO-CAM) in RDF/TTL format. The tool identifies "standard annotations" (annotation units with edges connected to multiple evidence nodes) and can optionally "unwind" them by duplicating the annotation for each evidence, ensuring all edges have only one evidence node.
 
+### Standard-Annotation Ratchet (local-only subsystem)
+
+Branch `local/std-annot-ratchet` adds a **local-only** (not yet upstream) sibling
+subsystem `src/gocam_unwinder/ratchet/` that reuses this tool's checks to filter
+the whole noctua-models corpus down to standard annotations via a two-level,
+monotonic, sharded pipeline, with rules-as-data in `rules/` and a self-contained
+HTML dashboard (`gocam_unwinder.ratchet.dashboard`). Design, the corpus-run
+recipe, and findings live in
+`docs/plans/2026-06-25-standard-annotation-ratchet.md`.
+
+**Contract for `gocam_ttl.py` editors:** `filter_out_non_std_annotations()` is now
+a thin loop over per-check callables `GoCamGraphBuilder.check_<key>(gcg, sa)`
+(assembled by `run_all_checks`); Phase B of the ratchet depends on these. Keep the
+split behavior-preserving — if you add/change a check, update the `check_<key>`
+callable and `UNIT_CHECK_KEYS`, not a re-inlined loop.
+
 ## Development Commands
 
 ### Setup

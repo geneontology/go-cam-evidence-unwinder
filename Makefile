@@ -179,6 +179,77 @@ $(NON_STD_REPORT): $(GO_ONTOLOGY) $(RO_ONTOLOGY) $(GROUPS_YAML)
 .PHONY: non_std
 non_std: $(NON_STD_REPORT)
 
+# ----------------------------------------------------------------------
+# Standard-annotation ratchet (local two-level filtering mini-pipeline).
+# Rules are data in rules/; see docs/plans/2026-06-25-standard-annotation-ratchet.md
+# ----------------------------------------------------------------------
+# The noctua-models corpus (S0). `make corpus` shallow-clones it as a sibling if
+# absent; override NOCTUA_MODELS_DIR to point at an existing checkout.
+NOCTUA_MODELS_DIR ?= ../noctua-models
+NOCTUA_MODELS_REPO ?= https://github.com/geneontology/noctua-models.git
+RATCHET_MODELS_DIR ?= $(NOCTUA_MODELS_DIR)/models
+# Where a run writes. Override to point the dashboard at a prior run's dir.
+RATCHET_OUT ?= $(TARGET_DIR)/ratchet
+# R1 source for "not a true GO-CAM": the published pipeline-from-goa skyhook
+# base (its reports/go-cam/02-filter.jsonl lists each model's status; "success"
+# == true GO-CAM). Override with a local dir / id-file / .jsonl, or set empty to
+# disable R1.
+TRUE_GOCAM_SOURCE ?= https://skyhook.geneontology.io/pipeline-from-goa/main
+# Parallel shards. Each worker loads its own GO ontology copy, so bound by RAM
+# (laptop ~4-8; a big fleet box can go higher). Resumable across runs.
+JOBS ?= 4
+
+# Fetch the corpus (shallow clone; ~2 GB working tree). No-op if it exists.
+$(NOCTUA_MODELS_DIR):
+	git clone --depth 1 $(NOCTUA_MODELS_REPO) $@
+.PHONY: corpus
+corpus: | $(NOCTUA_MODELS_DIR)
+	@echo "corpus ready: $(RATCHET_MODELS_DIR) ($$(find $(RATCHET_MODELS_DIR) -maxdepth 1 -name '*.ttl' | wc -l) models)"
+
+.PHONY: ratchet ratchet-smoke
+# Full corpus run. Resource-hungry (~55k models). Auto-fetches GO/RO and the
+# corpus if absent. Runs fine as a non-root user on a remote box: everything
+# writes under this checkout ($(RATCHET_OUT)) and the sibling corpus. Bound JOBS
+# by cores AND free RAM (each worker loads its own ~0.7 GB GO copy). R1 uses the
+# public skyhook URL by default -- override TRUE_GOCAM_SOURCE with a local path
+# on a host that mirrors skyhook. See README "Standard-Annotation Ratchet".
+ratchet: $(GO_ONTOLOGY) $(RO_ONTOLOGY) | $(NOCTUA_MODELS_DIR)
+	mkdir -p $(RATCHET_OUT)
+	python3 -m gocam_unwinder.ratchet \
+		--models-dir $(RATCHET_MODELS_DIR) \
+		--rules-dir rules \
+		--out-dir $(RATCHET_OUT) \
+		--go $(GO_ONTOLOGY) \
+		--ro $(RO_ONTOLOGY) \
+		--jobs $(JOBS) \
+		--skip-prefix SYNGO \
+		--skip-prefix R-HSA \
+		--skip-prefix YeastPathways \
+		$(if $(TRUE_GOCAM_SOURCE),--true-gocam-source $(TRUE_GOCAM_SOURCE),)
+
+# Build the shareable self-contained HTML dashboard from a ratchet run's output.
+# Reads $(RATCHET_OUT) (default: today's run) and writes dashboard.html beside it.
+# For a prior run: make ratchet-dashboard RATCHET_OUT=target_YYYYMMDD/ratchet
+.PHONY: ratchet-dashboard
+ratchet-dashboard: $(GROUPS_YAML)
+	python3 -m gocam_unwinder.ratchet.dashboard \
+		--out-dir $(RATCHET_OUT) \
+		--rules-dir rules \
+		--groups-yaml $(GROUPS_YAML) \
+		--output $(dir $(RATCHET_OUT))dashboard.html
+
+# Quick smoke run over the bundled test fixtures (no corpus download needed).
+ratchet-smoke: target/go_20250601.json
+	mkdir -p $(TARGET_DIR)/ratchet-smoke
+	python3 -m gocam_unwinder.ratchet \
+		--models-dir resources/test \
+		--rules-dir rules \
+		--out-dir $(TARGET_DIR)/ratchet-smoke \
+		--go target/go_20250601.json \
+		--ro resources/test/ro_20250723.owl \
+		--skip-prefix SYNGO \
+		--skip-prefix R-HSA
+
 # Clean up generated files
 clean:
 	rm -rf $(TARGET_DIR)

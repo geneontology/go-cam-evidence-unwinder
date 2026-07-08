@@ -1,0 +1,14 @@
+id: model_disconnected_individuals
+phase: model
+stage: 0
+kind: sparql
+remove_when: select_nonempty
+inputs: []
+description: >-
+  OPTIONAL QC example (disabled by default). Ported from noctua-models
+  sparql/check-disconnected-individuals.rq: enumerates owl:NamedIndividuals with
+  no incoming or outgoing connection to another individual (counting direct and
+  reified edges). Demonstrates the SELECT-style .rq path; enable to drop
+  malformed models. Note: evidence individuals can read as disconnected, so this
+  is intentionally off by default.
+enabled: false

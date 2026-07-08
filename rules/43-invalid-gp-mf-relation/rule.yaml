@@ -1,0 +1,12 @@
+id: invalid_gp_mf_relation
+phase: unit
+stage: 4
+tsv: 2
+kind: python
+entrypoint: unit_invalid_gp_mf_relation
+inputs: [go, gp_allowlist]
+description: >-
+  GP<->MF backbone relation validity: enabled_by (MF source) or contributes_to
+  (MF target); has_input/has_output allowed MF->GP extensions. One valid
+  backbone exempts the rest.
+enabled: true

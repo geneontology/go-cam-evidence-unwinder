@@ -1056,7 +1056,7 @@ class GoCamGraphBuilder:
 
         return primary
 
-    def parse_ttl(self, ttl_filename):
+    def parse_ttl(self, ttl_filename, classify=True):
         gocam = GoCamGraph()
         gocam.g.parse(ttl_filename, format="ttl")
         gocam.model_id = gocam.get_model_id()
@@ -1070,140 +1070,187 @@ class GoCamGraphBuilder:
             gocam.groups = group_uris
         gocam.standard_annotations = []
         gocam.extract_standard_annotations()
-        gocam = self.filter_out_non_std_annotations(gocam)
+        if classify:
+            gocam = self.filter_out_non_std_annotations(gocam)
         return gocam
+
+    # ------------------------------------------------------------------
+    # Per-check callables (ratchet Task 5). Each takes (gcg, sa) and returns
+    # the set of edge bnode_ids the check flags within a single
+    # StandardAnnotation; an empty set means the check passed.
+    # filter_out_non_std_annotations() assembles these into failed_checks.
+    # Splitting them out is BEHAVIOR-PRESERVING: run_all_checks() reproduces the
+    # original inline logic exactly (the existing test suite is the guard).
+    # ------------------------------------------------------------------
+
+    def check_inconsistent_evidence(self, gcg, sa):
+        """Multi-edge annotations: evidence must be consistent across edges."""
+        if not gcg.has_consistent_evidence_across_edges(sa):
+            return set(sa.edges.keys())
+        return set()
+
+    def check_multiple_mf_bp(self, gcg, sa):
+        """#11: at most one MF->BP edge (over self.mf_bp_valid_relations)."""
+        mf_bp_edges = [
+            edge for edge in sa.edges.values()
+            if self._go_aspect(edge.source_type, gcg.g) == "MF"
+            and self._go_aspect(edge.target_type, gcg.g) == "BP"
+            and str(edge.property_uri) in self.mf_bp_valid_relations
+        ]
+        if len(mf_bp_edges) > 1:
+            return {e.bnode_id for e in mf_bp_edges}
+        return set()
+
+    def check_mf_causal_mf(self, gcg, sa):
+        """#1 (RO): causal relation between two MF nodes. Empty without RO."""
+        flagged = set()
+        if self.causal_relations:
+            for edge in sa.edges.values():
+                if (self.uri_is_causal_relation(edge.property_uri) and
+                        self.uri_is_molecular_function(edge.source_type) and
+                        self.uri_is_molecular_function(edge.target_type)):
+                    flagged.add(edge.bnode_id)
+        return flagged
+
+    def check_edge_without_evidence(self, gcg, sa):
+        """#15: every edge must carry evidence."""
+        return {edge.bnode_id for edge in sa.edges.values()
+                if len(edge.evidence_uris) == 0}
+
+    def check_invalid_gp_mf_relation(self, gcg, sa):
+        """#2: GP<->MF backbone relation validity. Annotation-wide exemption:
+        at least one valid backbone edge exempts the rest."""
+        enabled_by = self.rel_enabled_by
+        contributes_to = self.rel_contributes_to
+        mf_source_extensions = {self.rel_has_input, self.rel_has_output}
+        invalid_candidates = []
+        has_valid_backbone = False
+        for edge in sa.edges.values():
+            src_mf = self._resolve_mf_type(edge.source_type, gcg.g)
+            tgt_mf = self._resolve_mf_type(edge.target_type, gcg.g)
+            # Skip non-MF and MF<->MF edges (latter is mf_causal_mf's domain)
+            if (src_mf is None) == (tgt_mf is None):
+                continue
+            if src_mf is not None:
+                other_type = edge.target_type
+                mf_on = "source"
+            else:
+                other_type = edge.source_type
+                mf_on = "target"
+            # Only MF<->gene-product edges are GP-MF backbone candidates.
+            if self._gene_product_namespace_key(other_type) not in self.GP_NAMESPACE_KEYS:
+                continue
+            if mf_on == "source":
+                if edge.property_uri == enabled_by:
+                    has_valid_backbone = True
+                elif edge.property_uri in mf_source_extensions:
+                    continue  # allowed MF->GP extension (has_input/has_output)
+                else:
+                    invalid_candidates.append(edge.bnode_id)
+            else:  # mf_on == "target"
+                if edge.property_uri == contributes_to:
+                    has_valid_backbone = True
+                else:
+                    invalid_candidates.append(edge.bnode_id)
+        if not has_valid_backbone and invalid_candidates:
+            return set(invalid_candidates)
+        return set()
+
+    def check_multiple_mf_anatomy(self, gcg, sa):
+        """#12: at most one MF->anatomical-structure edge."""
+        mf_anatomy_edges = [
+            edge for edge in sa.edges.values()
+            if self._go_aspect(edge.source_type, gcg.g) == "MF"
+            and self._is_anatomical_structure(edge.target_type)
+        ]
+        if len(mf_anatomy_edges) > 1:
+            return {e.bnode_id for e in mf_anatomy_edges}
+        return set()
+
+    def check_enabler_not_gp(self, gcg, sa):
+        """#13: the enabler (target of enabled_by) must be a gene product."""
+        flagged = set()
+        for edge in sa.edges.values():
+            if edge.property_uri == self.rel_enabled_by:
+                if self._gene_product_namespace_key(edge.target_type) not in self.GP_NAMESPACE_KEYS:
+                    flagged.add(edge.bnode_id)
+        return flagged
+
+    def _relation_rule_failures(self, gcg, sa, rule_key):
+        """Backbone-gated relation-validity failures for one rule key (#3/#4/
+        #5/#6/#10). Returns empty when the rule is absent (RO-dependent rules
+        without RO). Endpoint categories are disjoint, so evaluating a single
+        rule reproduces the original first-match-wins loop for that key."""
+        rule = next((r for r in self.relation_rules if r["key"] == rule_key), None)
+        if rule is None:
+            return set()
+        flagged = set()
+        for edge in sa.edges.values():
+            prop = str(edge.property_uri)
+            if prop not in self.backbone_relations:
+                continue  # extension-relation edge -> not validated
+            if self._matches_relation_rule(edge, rule, gcg.g):
+                if prop not in rule["valid"]:
+                    flagged.add(edge.bnode_id)
+        return flagged
+
+    def check_invalid_bp_cc_relation(self, gcg, sa):
+        """#10: BP->CC/anatomy must be occurs_in."""
+        return self._relation_rule_failures(gcg, sa, "invalid_bp_cc_relation")
+
+    def check_invalid_gp_cc_relation(self, gcg, sa):
+        """#3: GP->non-root CC must be located_in."""
+        return self._relation_rule_failures(gcg, sa, "invalid_gp_cc_relation")
+
+    def check_invalid_mf_cc_relation(self, gcg, sa):
+        """#6: root-MF->non-root CC must be is_active_in."""
+        return self._relation_rule_failures(gcg, sa, "invalid_mf_cc_relation")
+
+    def check_invalid_gp_bp_relation(self, gcg, sa):
+        """#4 (RO): GP->BP must be in the acts_upstream_of_or_within family."""
+        return self._relation_rule_failures(gcg, sa, "invalid_gp_bp_relation")
+
+    def check_invalid_mf_bp_relation(self, gcg, sa):
+        """#5 (RO): root-MF->non-root BP must be part_of/acts_upstream/causal."""
+        return self._relation_rule_failures(gcg, sa, "invalid_mf_bp_relation")
+
+    # Ordered list of all per-annotation check keys. RO-dependent checks
+    # (mf_causal_mf, invalid_gp_bp_relation, invalid_mf_bp_relation) naturally
+    # return empty when no RO is loaded.
+    UNIT_CHECK_KEYS = [
+        "inconsistent_evidence",
+        "multiple_mf_bp",
+        "mf_causal_mf",
+        "edge_without_evidence",
+        "invalid_gp_mf_relation",
+        "multiple_mf_anatomy",
+        "enabler_not_gp",
+        "invalid_bp_cc_relation",
+        "invalid_gp_cc_relation",
+        "invalid_mf_cc_relation",
+        "invalid_gp_bp_relation",
+        "invalid_mf_bp_relation",
+    ]
+
+    def run_check(self, key, gcg, sa):
+        """Run a single check by key, returning its flagged edge-bnode set."""
+        return getattr(self, "check_" + key)(gcg, sa)
+
+    def run_all_checks(self, gcg, sa):
+        """Run every check; return {key -> flagged set} (including empties)."""
+        return {key: self.run_check(key, gcg, sa) for key in self.UNIT_CHECK_KEYS}
 
     def filter_out_non_std_annotations(self, go_cam_graph: GoCamGraph):
         new_standard_annotations = []
         non_standard_annotations = []
-
         for std_annot in go_cam_graph.standard_annotations:
-            failed_checks = {}
-
-            # Check 1: Evidence consistency - all edges must have matching evidence metadata
-            if not go_cam_graph.has_consistent_evidence_across_edges(std_annot):
-                failed_checks["inconsistent_evidence"] = set()
-                # Every edge gets this failure
-                for edge_bnode_id in std_annot.edges.keys():
-                    failed_checks["inconsistent_evidence"].add(edge_bnode_id)
-
-            # Check #11: Cardinality MF->BP should be 1 (refines the former
-            # multiple_mf_part_of: narrows to MF->BP and admits the same relation
-            # set as #5 -- self.mf_bp_valid_relations, built once in __init__).
-            mf_bp_edges = [
-                edge for edge in std_annot.edges.values()
-                if self._go_aspect(edge.source_type, go_cam_graph.g) == "MF"
-                and self._go_aspect(edge.target_type, go_cam_graph.g) == "BP"
-                and str(edge.property_uri) in self.mf_bp_valid_relations
-            ]
-            if len(mf_bp_edges) > 1:
-                failed_checks["multiple_mf_bp"] = {e.bnode_id for e in mf_bp_edges}
-
-            # Check 3: Causal relation edge between two molecular function nodes
-            # If RO ontology was provided and causal relations were loaded
-            if self.causal_relations:
-                for edge in std_annot.edges.values():
-                    if (self.uri_is_causal_relation(edge.property_uri) and
-                            self.uri_is_molecular_function(edge.source_type) and
-                            self.uri_is_molecular_function(edge.target_type)):
-                        # Uh oh, start reporting the failure
-                        if "mf_causal_mf" not in failed_checks:
-                            failed_checks["mf_causal_mf"] = set()
-                        failed_checks["mf_causal_mf"].add(edge.bnode_id)
-
-            # Check 4: Edges without evidence
-            for edge in std_annot.edges.values():
-                if len(edge.evidence_uris) == 0:
-                    if "edge_without_evidence" not in failed_checks:
-                        failed_checks["edge_without_evidence"] = set()
-                    failed_checks["edge_without_evidence"].add(edge.bnode_id)
-
-            # Check 5: GP<->MF backbone must use `enabled_by` (MF as source) or
-            # `contributes to` / RO:0002326 (MF as target). NOT-qualified MFs are
-            # recognized via owl:complementOf class expressions. The non-MF
-            # endpoint must be a gene product (GP_NAMESPACE_KEYS) -- anatomy/
-            # ontology targets (EMAPA, WBbt, CL, ...) are extensions, not GPs.
-            # `has_input`/`has_output` are allowed MF->GP extension relations.
-            # Annotations with at least one valid backbone edge pass; those with
-            # no valid backbone get every invalid candidate edge flagged.
-            enabled_by = self.rel_enabled_by
-            contributes_to = self.rel_contributes_to
-            mf_source_extensions = {self.rel_has_input, self.rel_has_output}
-            invalid_candidates = []
-            has_valid_backbone = False
-            for edge in std_annot.edges.values():
-                src_mf = self._resolve_mf_type(edge.source_type, go_cam_graph.g)
-                tgt_mf = self._resolve_mf_type(edge.target_type, go_cam_graph.g)
-                # Skip non-MF and MF<->MF edges (latter is mf_causal_mf's domain)
-                if (src_mf is None) == (tgt_mf is None):
-                    continue
-                if src_mf is not None:
-                    other_type = edge.target_type
-                    mf_on = "source"
-                else:
-                    other_type = edge.source_type
-                    mf_on = "target"
-                # Only MF<->gene-product edges are GP-MF backbone candidates.
-                # Anatomy/ontology targets resolve to keys absent from the set.
-                if self._gene_product_namespace_key(other_type) not in self.GP_NAMESPACE_KEYS:
-                    continue
-                if mf_on == "source":
-                    if edge.property_uri == enabled_by:
-                        has_valid_backbone = True
-                    elif edge.property_uri in mf_source_extensions:
-                        continue  # allowed MF->GP extension (has_input/has_output)
-                    else:
-                        invalid_candidates.append(edge.bnode_id)
-                else:  # mf_on == "target"
-                    if edge.property_uri == contributes_to:
-                        has_valid_backbone = True
-                    else:
-                        invalid_candidates.append(edge.bnode_id)
-            if not has_valid_backbone and invalid_candidates:
-                failed_checks.setdefault("invalid_gp_mf_relation", set()).update(invalid_candidates)
-
-            # Check #12: Cardinality MF->anatomical-structure should be 1.
-            mf_anatomy_edges = [
-                edge for edge in std_annot.edges.values()
-                if self._go_aspect(edge.source_type, go_cam_graph.g) == "MF"
-                and self._is_anatomical_structure(edge.target_type)
-            ]
-            if len(mf_anatomy_edges) > 1:
-                failed_checks["multiple_mf_anatomy"] = {e.bnode_id for e in mf_anatomy_edges}
-
-            # Check #13: Enabler must be a gene product (not GO, ChEBI, etc.).
-            # Complements #2, which skips non-GP endpoints. The enabler is the
-            # target of an enabled_by (MF->GP) edge.
-            for edge in std_annot.edges.values():
-                if edge.property_uri == self.rel_enabled_by:
-                    if self._gene_product_namespace_key(edge.target_type) not in self.GP_NAMESPACE_KEYS:
-                        failed_checks.setdefault("enabler_not_gp", set()).add(edge.bnode_id)
-
-            # Checks 3, 4, 5, 6, 10: relation-validity rule table. These validate
-            # the BACKBONE of an annotation only. An edge is subject to validation
-            # only if its relation is a recognized backbone/placement relation
-            # (self.backbone_relations); edges using any other relation are
-            # annotation extensions (e.g. BP -results_in_development_of-> anatomy)
-            # and are informational, not failures (consistent with #7/#8/#9).
-            # Endpoint categories are disjoint, so at most one rule matches an edge.
-            for edge in std_annot.edges.values():
-                prop = str(edge.property_uri)
-                if prop not in self.backbone_relations:
-                    continue  # extension-relation edge -> not validated
-                for rule in self.relation_rules:
-                    if self._matches_relation_rule(edge, rule, go_cam_graph.g):
-                        if prop not in rule["valid"]:
-                            failed_checks.setdefault(rule["key"], set()).add(edge.bnode_id)
-                        break
-
+            failed_checks = {k: v for k, v
+                             in self.run_all_checks(go_cam_graph, std_annot).items() if v}
             std_annot.failed_checks = failed_checks
-
-            # Categorize annotation
             if failed_checks:
                 non_standard_annotations.append(std_annot)
             else:
                 new_standard_annotations.append(std_annot)
-
         go_cam_graph.standard_annotations = new_standard_annotations
         go_cam_graph.non_standard_annotations = non_standard_annotations
         return go_cam_graph

@@ -1,0 +1,11 @@
+id: invalid_mf_cc_relation
+phase: unit
+stage: 2
+tsv: 6
+kind: python
+entrypoint: unit_invalid_mf_cc_relation
+inputs: [go]
+description: >-
+  A root molecular function connected to a non-root cellular component must
+  use is_active_in (RO:0002432).
+enabled: true
