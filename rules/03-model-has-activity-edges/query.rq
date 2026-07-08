@@ -1,0 +1,12 @@
+PREFIX owl: <http://www.w3.org/2002/07/owl#>
+
+# TRUE when the model has at least one GO-CAM relation edge: an OBO-namespace
+# (BFO/RO) reified owl:Axiom. With remove_when: ask_false the model is removed
+# when this is FALSE -- i.e. it has no activity edges to contribute.
+ASK {
+  ?ax a owl:Axiom ;
+      owl:annotatedSource ?s ;
+      owl:annotatedProperty ?p ;
+      owl:annotatedTarget ?t .
+  FILTER(STRSTARTS(STR(?p), "http://purl.obolibrary.org/obo/"))
+}

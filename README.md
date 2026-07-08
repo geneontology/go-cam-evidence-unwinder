@@ -75,3 +75,81 @@ python src/gocam_unwinder/gocam_ttl.py \
 ```
 
 This is useful when processing many models, as it prevents the statistics report from being mixed with the "Split evidence" progress messages.
+
+## Standard-Annotation Ratchet
+
+The `local/std-annot-ratchet` branch adds a two-level, monotonic pipeline that
+filters the whole [noctua-models](https://github.com/geneontology/noctua-models)
+corpus down to *standard annotations*, emitting a surviving set + a "what got
+filtered out" report at each stage, plus a self-contained, shareable HTML
+dashboard. Filtering rules live as data in `rules/`. Design, the rule inventory,
+and findings are in
+[`docs/plans/2026-06-25-standard-annotation-ratchet.md`](docs/plans/2026-06-25-standard-annotation-ratchet.md).
+
+### Running it over the full corpus
+
+This works as an ordinary, **non-root user** — on your laptop, or (for the ~55k
+model corpus) on a powerful box you can SSH into. Everything writes under your
+own checkout (`target_*/`) and a sibling `noctua-models/`; nothing needs a system
+install or elevated privileges.
+
+```bash
+# 0. Get a checkout (e.g. on the remote box you SSH into).
+git clone https://github.com/geneontology/go-cam-evidence-unwinder.git
+cd go-cam-evidence-unwinder
+
+# 1. A virtualenv in your own space, editable install.
+python3 -m venv env && . env/bin/activate
+pip install -r requirements.txt && pip install -e .
+
+# 2. Fetch the corpus (shallow clone, ~2 GB) as a sibling ../noctua-models.
+make corpus
+
+# 3. Run the ratchet, sharded. JOBS ~= cores minus headroom on a shared box.
+#    Auto-downloads the GO and RO ontologies on first run.
+make ratchet JOBS=8
+
+# 4. Build the shareable dashboard (auto-downloads groups.yaml).
+make ratchet-dashboard
+```
+
+Open `target_YYYYMMDD/dashboard.html` in a browser — it's a single self-contained
+file, so you can copy it off the remote host and share it as-is. For a quick,
+corpus-free sanity check, `make ratchet-smoke`.
+
+Notes for remote / restricted hosts:
+
+- **Sizing `JOBS`:** each shard worker loads its own ~0.7 GB GO copy, so pick
+  `JOBS` from the box's cores **and** free RAM. (A 96-core / 1 TiB host ran the
+  full corpus at `JOBS=48` in ~80 s.) Shards resume across runs via a `.done`
+  marker.
+- **R1 source:** "not a true GO-CAM" defaults to the public
+  `https://skyhook.geneontology.io/pipeline-from-goa/main`. On a host that mirrors
+  skyhook locally, skip the network by pointing at the local file:
+  `make ratchet TRUE_GOCAM_SOURCE=/path/to/pipeline-from-goa/main/reports/go-cam/02-filter.jsonl`.
+- **Existing corpus checkout:** set `NOCTUA_MODELS_DIR=/path/to/noctua-models`
+  instead of running `make corpus`.
+- **Any ordinary login account works:** run under your own account and stage the
+  checkout, venv, and `target_*/` outputs wherever you can write (`$HOME` or
+  `/tmp`). No root, `sudo`, or shared service account is needed.
+- **Driving it non-interactively (a script, or your own coding agent over SSH):**
+  the agent runs on your local machine and drives the remote host over SSH. On
+  your local machine, generate a dedicated, passphrase-less key just for this
+  (never a personal key) and authorize its public half on *your own* account on
+  the remote host:
+
+  ```bash
+  ssh-keygen -t ed25519 -N '' -C std-annot-ratchet-agent -f ~/.ssh/ratchet-agent
+  # then append ~/.ssh/ratchet-agent.pub to <you>@<host>:~/.ssh/authorized_keys
+  ```
+
+  Each remote command runs in a fresh non-login shell, so activate the venv in the
+  command itself:
+
+  ```bash
+  ssh -i ~/.ssh/ratchet-agent <you>@<host> \
+    'cd <checkout> && . env/bin/activate && make ratchet JOBS=48'
+  ```
+
+  Nothing about this is committed to the repo — only your key's public half lives
+  in your remote `~/.ssh/authorized_keys`.

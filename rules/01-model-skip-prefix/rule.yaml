@@ -1,0 +1,11 @@
+id: skip_prefix
+phase: model
+stage: 0
+kind: python
+entrypoint: skip_prefix_gate
+inputs: [skip_prefixes]
+description: >-
+  Drop whole models whose filename starts with a configured prefix (e.g. SYNGO,
+  R-HSA for Reactome imports). Filename-only test; no graph parse. A no-op when
+  no prefixes are configured.
+enabled: true

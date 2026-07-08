@@ -1,0 +1,11 @@
+id: mf_causal_mf
+phase: unit
+stage: 3
+tsv: 1
+kind: python
+entrypoint: unit_mf_causal_mf
+inputs: [go, ro]
+description: >-
+  A causal relation (RO:0002418 family) connecting two molecular functions is
+  not allowed. Skipped without RO.
+enabled: true
