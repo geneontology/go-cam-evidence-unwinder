@@ -3,12 +3,14 @@ import os
 import sys
 
 import ontobio.util.go_utils
+import requests
 import rdflib
 import yaml
 from ontobio.rdfgen import relations
 from rdflib import URIRef
 from prefixcommons import curie_util
-from typing import List
+from typing import List, Optional
+from dataclasses import dataclass, field
 
 parser = argparse.ArgumentParser()
 parser.add_argument('-m', '--model_filename', help="Single GO-CAM model file to process")
@@ -19,13 +21,21 @@ parser.add_argument('-r', '--ro_filename', help="RO ontology filename (OWL forma
 parser.add_argument('--split-evidence', action='store_true', help="Split multi-evidence edges into separate edges")
 parser.add_argument('--output-dir', help="Output directory for split evidence files")
 parser.add_argument('--report-file', help="Output file for statistics report (TSV format). If not specified, output goes to stdout.")
+parser.add_argument('--basic-report', action='store_true',
+                    help="Write the basic 11-column stats report instead of the default extended report")
 parser.add_argument('--criteria-fail-report', help="Output file for standard annotation criteria failure report (TSV format).")
+parser.add_argument('--remainders-report', help="Output TSV file for the bucketed remainders report (non-standard / nested-extension triage)")
 parser.add_argument('--skip-prefix', action='append', dest='skip_prefixes', metavar='PREFIX',
                     help="Skip files starting with PREFIX (can be specified multiple times, e.g., --skip-prefix SYNGO --skip-prefix R-HSA)")
 parser.add_argument('--skip-file', dest='skip_file', metavar='FILE',
                     help="Skip TTL files whose filename appears in FILE (one .ttl filename per line, e.g. true GO-CAM models to exclude)")
 parser.add_argument('--groups-yaml', help="Path to groups.yaml for resolving group URIs to labels")
 parser.add_argument('--date-change-report', help="Output TSV file for date change report (model ID, title, original/new dates, edge labels)")
+parser.add_argument('--fix-nested-anatomy', action='store_true',
+                    help="Rewrite nested anatomy extension edges to attach directly to the annotation's primary individual")
+parser.add_argument('--nested-fix-report', help="Output TSV file for the nested-anatomy fix report (one row per rewritten edge)")
+parser.add_argument('--no-label-api', action='store_true',
+                    help="Disable OLS API fallback for resolving non-GO/RO term labels (enabled by default)")
 
 GOCAM_RELATIONS = [str(r) for r in relations.__relation_label_lookup.values()]
 
@@ -120,6 +130,136 @@ def load_groups_lookup(groups_yaml_path: str) -> dict:
             lookup[group['id']] = group['label']
 
     return lookup
+
+
+# Lead-aspect priority order for picking a single aspect per annotation.
+# BP wins when present (the BP backbone subsumes MF in the design); CC is
+# next, MF is the fallback for annotations with only an MF backbone.
+ASPECT_PRIORITY = ("BP", "CC", "MF")
+
+
+def pick_lead_aspect(primary_terms):
+    """Return the lead aspect for an annotation, by priority BP > CC > MF, or None."""
+    for aspect in ASPECT_PRIORITY:
+        if aspect in primary_terms:
+            return aspect
+    return None
+
+
+def find_nested_extensions(annot, builder):
+    """Return (lead_aspect, nested_edges) for an annotation, or (None, []) if there
+    is no backbone or no nested extension.
+
+    A nested extension edge is an extension edge (per builder.get_extension_edges)
+    whose source_type is not in the lead aspect's primary GO term URI set.
+    """
+    primary_terms = builder.get_primary_go_terms(annot)
+    lead = pick_lead_aspect(primary_terms)
+    if lead is None:
+        return None, []
+    primary_uri_set = set(primary_terms[lead])
+    nested = [
+        edge for edge in builder.get_extension_edges(annot)
+        if edge.source_type not in primary_uri_set
+    ]
+    if not nested:
+        return lead, []
+    return lead, nested
+
+
+# Canonical order of all standard-annotation failure-check names. Fixed so the
+# extended stats report has stable columns even when a model has zero of a given
+# failure. Mirrors the checks recorded by filter_out_non_std_annotations.
+CHECK_NAMES = (
+    "inconsistent_evidence",
+    "multiple_mf_bp",
+    "mf_causal_mf",
+    "edge_without_evidence",
+    "invalid_gp_mf_relation",
+    "invalid_gp_cc_relation",
+    "invalid_gp_bp_relation",
+    "invalid_mf_bp_relation",
+    "invalid_mf_cc_relation",
+    "invalid_bp_cc_relation",
+    "multiple_mf_anatomy",
+    "enabler_not_gp",
+    "no_gp_at_all",
+)
+
+# The only checks a both-anatomical nested extension edge can contribute to: a
+# relation-validity check never fires on an anatomy->anatomy edge (no rule has an
+# anatomy source category), so de-nesting accounts for the whole of a
+# non-standard annotation's failures only when every failing check is one of
+# these. Defines a "fixable" non-standard annotation in compute_model_stats.
+NESTING_ATTRIBUTABLE_CHECKS = frozenset({
+    "inconsistent_evidence",
+    "edge_without_evidence",
+})
+
+
+@dataclass
+class ModelStats:
+    """Per-model statistics. Base fields reproduce the base --report-file columns
+    exactly; extended fields back the extended --report-file output (the default
+    unless --basic-report is passed). The bucketed --remainders-report is built
+    separately in remainders_report.py and does not use this class.
+
+    Exception: std_multi_evidence_count is an internal driving field (it gates
+    --split-evidence), not a report column, so it is not emitted by to_base_row.
+    """
+
+    # --- base fields (today's --report-file columns) ---
+    model_id: str                        # exact "Model ID" cell (caller-supplied)
+    title: str
+    standard_count: int
+    non_standard_count: int
+    multi_evidence_count: int            # std + non-std
+    mixed_annotation_type: bool
+    mf_causal_edge_count: int            # "MF-causal->MF Edges" (EDGE count)
+    no_evidence_edge_count: int
+    modelstate: Optional[str]
+    groups: List[str]                    # already resolved to labels
+    multi_evidence_go_terms: List[str]   # sorted, resolved labels
+    std_multi_evidence_count: int        # std-only; drives the --split decision
+
+    # --- extended fields (debug stats report only) ---
+    nested_mf_count: int = 0
+    nested_bp_count: int = 0
+    nested_cc_count: int = 0
+    fixable_standard_count: int = 0
+    fixable_nonstandard_count: int = 0
+    failure_counts: dict = field(default_factory=lambda: {n: 0 for n in CHECK_NAMES})
+
+    BASE_HEADERS = ["Model ID", "Title", "Standard Annotations",
+        "Non-Standard Annotations", "Multi-Evidence Annotations",
+        "Mixed Annotation Type", "MF-causal->MF Edges", "Edges w/o Evidence",
+        "Model State", "Groups", "Multi-Evidence GO Terms"]
+
+    @classmethod
+    def base_header(cls):
+        return list(cls.BASE_HEADERS)
+
+    def to_base_row(self):
+        return [self.model_id, self.title, str(self.standard_count),
+            str(self.non_standard_count), str(self.multi_evidence_count),
+            "Yes" if self.mixed_annotation_type else "No",
+            str(self.mf_causal_edge_count), str(self.no_evidence_edge_count),
+            self.modelstate or "", "|".join(self.groups),
+            "|".join(self.multi_evidence_go_terms)]
+
+    @classmethod
+    def extended_header(cls):
+        return cls.base_header() + [
+            "Nested MF Extensions", "Nested BP Extensions", "Nested CC Extensions",
+            "Fixable (Standard)", "Fixable (Non-Standard)",
+        ] + [f"fail:{n}" for n in CHECK_NAMES]
+
+    def to_extended_row(self):
+        return self.to_base_row() + [
+            str(self.nested_mf_count), str(self.nested_bp_count),
+            str(self.nested_cc_count), str(self.fixable_standard_count),
+            str(self.fixable_nonstandard_count),
+        ] + [str(self.failure_counts[n]) for n in CHECK_NAMES]
 
 
 class StandardAnnotationEdge:
@@ -451,6 +591,84 @@ class GoCamGraph:
         # for obj in self.g.objects(old_individual_uri, rdflib.RDF.type):
         #     self.g.add((new_individual_uri, rdflib.RDF.type, obj))
 
+    def rewrite_edge_source_and_relation(self, bnode_id, old_source, old_property,
+                                         target, new_source, new_property):
+        """
+        Re-point an edge's source individual and relation, updating BOTH the
+        assertion triple and its reified owl:Axiom bnode.
+
+        Used to de-nest an anatomy extension: the nested edge
+        (old_source -old_property-> target) becomes
+        (new_source -new_property-> target), where new_source is the
+        extension-chain-start individual chosen by plan_nested_anatomy_fixes (the
+        backbone individual where the extension chain departs -- not necessarily the
+        lead-aspect primary). annotatedTarget, evidence, dates, and contributors on
+        the axiom bnode are left untouched. The axiom bnode is updated only if it
+        exists (defensive — a bare assertion may never have been reified).
+        """
+        # Assertion triple
+        self.g.remove((old_source, old_property, target))
+        self.g.add((new_source, new_property, target))
+
+        # Reified owl:Axiom bnode
+        bnode = rdflib.term.BNode(bnode_id)
+        if (bnode, rdflib.namespace.OWL.annotatedSource, old_source) in self.g:
+            self.g.remove((bnode, rdflib.namespace.OWL.annotatedSource, old_source))
+            self.g.add((bnode, rdflib.namespace.OWL.annotatedSource, new_source))
+        if (bnode, rdflib.namespace.OWL.annotatedProperty, old_property) in self.g:
+            self.g.remove((bnode, rdflib.namespace.OWL.annotatedProperty, old_property))
+            self.g.add((bnode, rdflib.namespace.OWL.annotatedProperty, new_property))
+
+    def delete_edge(self, bnode_id, source, property, target):
+        """
+        Remove an edge entirely: its assertion triple AND its reified owl:Axiom
+        bnode (dates, contributors and all other axiom triples included).
+
+        Used by the --fix-nested-anatomy mode to drop a nested anatomy extension
+        whose chain cannot be safely re-pointed (the chain departs the backbone via
+        a relation that is not occurs_in/part_of/is_active_in, so inheriting it
+        would fabricate a wrong edge).
+
+        Returns the list of evidence individual URIs the axiom referenced (captured
+        before the bnode is removed). Those, together with the edge's endpoints, are
+        the candidates the caller passes to prune_orphan_individuals() so any
+        evidence node or anatomy individual left dangling by the deletion is removed.
+        """
+        bnode = rdflib.term.BNode(bnode_id)
+        evidence_pred = rdflib.URIRef("http://geneontology.org/lego/evidence")
+        evidence_uris = list(self.g.objects(bnode, evidence_pred))
+        self.g.remove((source, property, target))
+        self.g.remove((bnode, None, None))
+        return evidence_uris
+
+    def _individual_has_edges(self, ind):
+        """True if `ind` (a URIRef) still participates in any GO-CAM edge: it is
+        the object of some remaining triple (an incoming assertion or an axiom's
+        annotatedSource/annotatedTarget/annotatedProperty pointing at it), or it is
+        the subject of an outgoing OBO-namespace relation assertion. Its own
+        declaration triples (rdf:type, layout hints, providedBy, dates) do not
+        count."""
+        obo = "http://purl.obolibrary.org/obo/"
+        for _ in self.g.subjects(None, ind):
+            return True
+        for p in self.g.predicates(ind, None):
+            if str(p).startswith(obo):
+                return True
+        return False
+
+    def prune_orphan_individuals(self, candidate_uris):
+        """Remove every individual in `candidate_uris` that no longer participates
+        in any edge (see _individual_has_edges), deleting all triples with it as
+        subject. Call AFTER all edge deletions so multi-hop chains resolve in one
+        pass. Returns the list of pruned individual URIs (as strings)."""
+        pruned = []
+        for uri in candidate_uris:
+            ind = uri if isinstance(uri, rdflib.term.Identifier) else rdflib.URIRef(uri)
+            if not self._individual_has_edges(ind):
+                self.g.remove((ind, None, None))
+                pruned.append(str(ind))
+        return pruned
+
     def evidence_triples(self):
         evidence_rel = rdflib.URIRef("http://geneontology.org/lego/evidence")
         for triple in self.g.triples((None, evidence_rel, None)):
@@ -494,19 +712,34 @@ class GoCamGraph:
             return title.replace("\t", " ").replace("\n", " ")
 
     def get_modelstate(self):
-        """Get the model state, looking only at the model-level subject."""
+        """Get the model state, looking only at the model-level subject.
+
+        A model may carry more than one modelstate value. If any of them is
+        "delete", return "delete" so the model is treated as deleted and skipped
+        (the delete value must win regardless of rdflib's object iteration order).
+        Otherwise return the first value, or None if there is none.
+        """
         model_uri = rdflib.URIRef(self.get_model_id())
         modelstate_pred = rdflib.URIRef("http://geneontology.org/lego/modelstate")
-        for modelstate in self.g.objects(model_uri, modelstate_pred):
-            return str(modelstate)
+        states = [str(s) for s in self.g.objects(model_uri, modelstate_pred)]
+        if "delete" in states:
+            return "delete"
+        return states[0] if states else None
 
     def get_groups(self):
-        """Get all groups (providedBy values) at the model level."""
-        model_uri = rdflib.URIRef(self.get_model_id())
+        """Get all groups (providedBy values) for the model.
+
+        Prefers the model (Ontology) node's providedBy. Some models record group
+        provenance only on statements/evidence/axioms and omit the model-level
+        triple; for those, fall back to the distinct providedBy values found
+        anywhere in the graph so the group is still reported (rather than blank).
+        """
         provided_by_pred = rdflib.URIRef("http://purl.org/pav/providedBy")
-        groups = []
-        for group in self.g.objects(model_uri, provided_by_pred):
-            groups.append(str(group))
+        model_uri = rdflib.URIRef(self.get_model_id())
+        groups = [str(group) for group in self.g.objects(model_uri, provided_by_pred)]
+        if not groups:
+            groups = sorted({str(group)
+                             for group in self.g.objects(None, provided_by_pred)})
         return groups
 
     def find_axiom_bits(self, bnode_id):
@@ -723,7 +956,23 @@ class GoCamGraphBuilder:
         "cl", "uberon", "emapa", "wbbt", "fbbt", "zfa", "ma", "po",
     }
 
-    def __init__(self, ontology_path, ro_ontology_path=None, groups_yaml_path=None):
+    # Top-level cellular-component branches (CURIEs), used by _cc_branch to pick
+    # the valid GP->CC relation for check #3. The CC aspect (GO:0005575) splits
+    # into these disjoint is_a subtrees:
+    #   GO:0032991 protein-containing complex  -> GP must be "part of"
+    #   GO:0110165 cellular anatomical structure | GO:0044423 virion component
+    #                                           -> GP must be "located in" / "is active in"
+    COMPLEX_CC_ROOT = "GO:0032991"
+    ANATOMICAL_CC_ROOTS = {"GO:0110165", "GO:0044423"}
+
+    # EBI OLS4 REST API for resolving labels of terms not in the local GO/RO
+    # ontologies (anatomy CL/UBERON/EMAPA/WBbt/..., plus CHEBI/ECO/PR/...).
+    OLS4_TERMS_URL = "https://www.ebi.ac.uk/ols4/api/terms"
+    OLS4_TIMEOUT = 10                  # connect + read timeout (seconds)
+    OLS4_MAX_CONSECUTIVE_FAILURES = 5  # disable API for the run after this many
+
+    def __init__(self, ontology_path, ro_ontology_path=None, groups_yaml_path=None,
+                 resolve_labels_api=True):
         # Store and parse the GO ontology
         self.ontology = ontobio.ontol_factory.OntologyFactory().create(ontology_path)
         self.go_aspector = ontobio.util.go_utils.GoAspector(self.ontology)
@@ -782,6 +1031,15 @@ class GoCamGraphBuilder:
             {str(self.rel_located_in), str(self.rel_is_active_in),
              str(self.rel_occurs_in), str(self.rel_part_of)}
             | set(self.acts_upstream_relations) | set(self.causal_relations))
+
+        # OLS API label-resolution state. The cache maps an IRI string to a
+        # label (str) or None (negative-cached miss), so each ID is queried at
+        # most once per run. The session is created lazily on first fetch.
+        self.resolve_labels_api = resolve_labels_api
+        self._api_label_cache = {}
+        self._api_session = None
+        self._api_consecutive_failures = 0
+        self._api_disabled = False
 
     def uri_is_causal_relation(self, uri: URIRef) -> bool:
         """
@@ -851,6 +1109,34 @@ class GoCamGraphBuilder:
             return True
         return self._gene_product_namespace_key(type_node) in self.ANATOMY_NAMESPACE_KEYS
 
+    def _cc_branch(self, type_node):
+        """Bucket a GO cellular-component type into its top CC branch, by is_a
+        closure: "complex" (GO:0032991 protein-containing complex subtree) or
+        "anatomical" (GO:0110165 cellular anatomical structure / GO:0044423
+        virion component subtree). Returns None for non-GO / non-CC nodes (and
+        for a CC under none of the three top-level CC branch roots, e.g. the
+        bare CC root GO:0005575).
+
+        Uses the is_a closure (subClassOf only) -- the same closure GoAspector
+        uses for aspect classification -- so a complex that is part_of an
+        anatomical structure is still classified "complex". The closure is
+        non-reflexive, so the term itself is added back to classify a
+        branch-root term used directly as a target. Used by check #3 via the
+        tgt_cc_branch rule constraint."""
+        if not isinstance(type_node, URIRef):
+            return None
+        parsed = curie_util.contract_uri(str(type_node))
+        if not parsed or not parsed[0].startswith("GO:"):
+            return None
+        curie = parsed[0]
+        closure = set(self.go_aspector.get_isa_closure(curie))
+        closure.add(curie)  # reflexive: a branch-root term belongs to its own branch
+        if self.COMPLEX_CC_ROOT in closure:
+            return "complex"
+        if closure & self.ANATOMICAL_CC_ROOTS:
+            return "anatomical"
+        return None
+
     def _category(self, type_node, graph):
         """Disjoint endpoint category for an edge: "MF" | "BP" | "CC" | "GP" |
         "ANATOMY" | None. GO terms resolve to their aspect; otherwise a
@@ -881,10 +1167,15 @@ class GoCamGraphBuilder:
             {"key": "invalid_bp_cc_relation", "src": {"BP"}, "tgt": {"CC", "ANATOMY"},
              "src_root_mf": False, "tgt_nonroot": False,
              "valid": {str(self.rel_occurs_in)}},
-            # #3  GP -> non-root CC : located_in
+            # #3a  GP -> non-root protein-containing complex (GO:0032991 subtree) : part_of
             {"key": "invalid_gp_cc_relation", "src": {"GP"}, "tgt": {"CC"},
-             "src_root_mf": False, "tgt_nonroot": True,
-             "valid": {str(self.rel_located_in)}},
+             "src_root_mf": False, "tgt_nonroot": True, "tgt_cc_branch": "complex",
+             "valid": {str(self.rel_part_of)}},
+            # #3b  GP -> non-root cellular anatomical structure (GO:0110165) /
+            #      virion component (GO:0044423) subtree : located_in OR is_active_in
+            {"key": "invalid_gp_cc_relation", "src": {"GP"}, "tgt": {"CC"},
+             "src_root_mf": False, "tgt_nonroot": True, "tgt_cc_branch": "anatomical",
+             "valid": {str(self.rel_located_in), str(self.rel_is_active_in)}},
             # #6  root-MF -> non-root CC : is_active_in
             {"key": "invalid_mf_cc_relation", "src": {"MF"}, "tgt": {"CC"},
              "src_root_mf": True, "tgt_nonroot": True,
@@ -916,6 +1207,9 @@ class GoCamGraphBuilder:
         if rule["src_root_mf"] and not self._is_root_go_term(edge.source_type):
             return False
         if rule["tgt_nonroot"] and self._is_root_go_term(edge.target_type):
+            return False
+        branch = rule.get("tgt_cc_branch")
+        if branch is not None and self._cc_branch(edge.target_type) != branch:
             return False
         return True
 
@@ -972,56 +1266,63 @@ class GoCamGraphBuilder:
             return self.go_aspector.is_cellular_component(parsed_curies[0])
         return False
 
+    def _backbone_role(self, edge: StandardAnnotationEdge):
+        """
+        Return the gene-product -> MF/BP/CC backbone role of `edge`, or None if
+        the edge is an annotation extension (not part of any backbone).
+
+        Backbone patterns (first match wins):
+          - "MF": predicate == enabled_by AND source is MF
+          - "BP": predicate in mf_bp_valid_relations (part_of OR the
+                  acts_upstream_of_or_within RO:0002264 family OR the
+                  causally_upstream_of_or_within RO:0002418 family) AND source is
+                  the ROOT MF (GO:0003674) AND target is BP
+          - "CC": predicate in {located_in, is_active_in} AND target is CC
+
+        The BP rule requires the source MF to be the root MF: a specific
+        (non-root) MF -part_of-> BP is an extension, not a BP backbone, so the
+        annotation it belongs to remains MF-led (the BP is contextual). Only the
+        canonical "BP-only" pattern (unknown/root MF part_of OR causally upstream
+        of a BP) counts as a BP backbone. The relation set is shared with the #5
+        invalid_mf_bp_relation check (self.mf_bp_valid_relations) so the two
+        cannot diverge; without an RO ontology it falls back to part_of only (the
+        upstream/causal families require RO).
+        """
+        if edge.property_uri == self.rel_enabled_by and self.uri_is_molecular_function(edge.source_type):
+            return "MF"
+        if (str(edge.property_uri) in self.mf_bp_valid_relations
+                and self._is_root_go_term(edge.source_type)
+                and self.uri_is_molecular_function(edge.source_type)
+                and self.uri_is_biological_process(edge.target_type)):
+            return "BP"
+        if (edge.property_uri in {self.rel_located_in, self.rel_is_active_in}
+                and self.uri_is_cellular_component(edge.target_type)):
+            return "CC"
+        return None
+
     def get_extension_edges(self, annot: StandardAnnotation) -> List[StandardAnnotationEdge]:
         """
         Return edges in `annot` that are annotation extensions —
-        edges that fall outside the gene-product -> MF/BP/CC backbone.
-
-        Backbone patterns (any match -> the edge is backbone, not extension):
-          1. MF backbone: predicate == enabled_by AND source is MF
-          2. BP backbone: predicate == part_of AND source is MF AND target is BP
-          3. CC backbone: predicate in {located_in, is_active_in} AND target is CC
+        edges that fall outside the gene-product -> MF/BP/CC backbone (see
+        _backbone_role for the backbone patterns).
 
         Multi-hop extensions (e.g., CL -part_of-> EMAPA reached via the BP node)
-        are returned because they fail to match any backbone pattern.
+        are returned because they fail to match any backbone pattern, as is a
+        specific (non-root) MF -part_of-> BP edge.
 
         The returned list preserves the order of `annot.edges`.
         """
-        enabled_by = URIRef(relations.lookup_label("enabled by"))
-        part_of = URIRef(relations.lookup_label("part of"))
-        located_in = URIRef(relations.lookup_label("located in"))
-        is_active_in = URIRef(relations.lookup_label("is active in"))
-        cc_predicates = {located_in, is_active_in}
-
-        backbone_bnode_ids = set()
-        for edge in annot.edges.values():
-            # Rule 1: MF backbone (MF -enabled_by-> GP). Also covers the
-            # MF-enabled_by-GP edge inside a BP or CC annotation.
-            if edge.property_uri == enabled_by and self.uri_is_molecular_function(edge.source_type):
-                backbone_bnode_ids.add(edge.bnode_id)
-                continue
-            # Rule 2: BP backbone (MF -part_of-> BP)
-            if (edge.property_uri == part_of
-                    and self.uri_is_molecular_function(edge.source_type)
-                    and self.uri_is_biological_process(edge.target_type)):
-                backbone_bnode_ids.add(edge.bnode_id)
-                continue
-            # Rule 3: CC backbone (GP -located_in/is_active_in-> CC)
-            if (edge.property_uri in cc_predicates
-                    and self.uri_is_cellular_component(edge.target_type)):
-                backbone_bnode_ids.add(edge.bnode_id)
-                continue
-
-        return [edge for edge in annot.edges.values() if edge.bnode_id not in backbone_bnode_ids]
+        return [edge for edge in annot.edges.values()
+                if self._backbone_role(edge) is None]
 
     def get_primary_go_terms(self, annot: StandardAnnotation) -> dict:
         """
         Return the primary GO term URIs of an annotation, grouped by aspect.
 
         The primary GO term per aspect is identified by which edge matches a
-        backbone pattern (same rules as get_extension_edges):
+        backbone pattern (see _backbone_role):
           - MF: source_type of an MF -enabled_by-> GP edge
-          - BP: target_type of an MF -part_of-> BP edge
+          - BP: target_type of a root-MF -part_of-> BP edge
           - CC: target_type of a   ? -located_in/is_active_in-> CC edge
 
         Returns a dict mapping aspect ("MF", "BP", "CC") to a list of primary
@@ -1030,31 +1331,363 @@ class GoCamGraphBuilder:
         annotation contains multiple matching backbone edges (rare in
         well-formed data, useful to surface).
         """
-        enabled_by = URIRef(relations.lookup_label("enabled by"))
-        part_of = URIRef(relations.lookup_label("part of"))
-        located_in = URIRef(relations.lookup_label("located in"))
-        is_active_in = URIRef(relations.lookup_label("is active in"))
-        cc_predicates = {located_in, is_active_in}
-
         primary = {}
         for edge in annot.edges.values():
-            # Rule 1: MF backbone -> primary MF is the source type
-            if edge.property_uri == enabled_by and self.uri_is_molecular_function(edge.source_type):
+            role = self._backbone_role(edge)
+            if role == "MF":
+                # MF backbone -> primary MF is the source type
                 primary.setdefault("MF", []).append(edge.source_type)
-                continue
-            # Rule 2: BP backbone -> primary BP is the target type
-            if (edge.property_uri == part_of
-                    and self.uri_is_molecular_function(edge.source_type)
-                    and self.uri_is_biological_process(edge.target_type)):
+            elif role == "BP":
+                # BP backbone -> primary BP is the target type
                 primary.setdefault("BP", []).append(edge.target_type)
-                continue
-            # Rule 3: CC backbone -> primary CC is the target type
-            if (edge.property_uri in cc_predicates
-                    and self.uri_is_cellular_component(edge.target_type)):
+            elif role == "CC":
+                # CC backbone -> primary CC is the target type
                 primary.setdefault("CC", []).append(edge.target_type)
-                continue
 
         return primary
+
+    def get_primary_individuals(self, annot: StandardAnnotation) -> dict:
+        """
+        Return the primary *individual* URIs of an annotation, grouped by aspect.
+
+        Mirror of get_primary_go_terms, but collects the backbone individual URI
+        (not its type) per aspect, using the same _backbone_role dispatch:
+          - MF: source_uri of an MF -enabled_by-> GP edge
+          - BP: target_uri of a root-MF -part_of-> BP edge
+          - CC: target_uri of a   ? -located_in/is_active_in-> CC edge
+
+        Returns a dict mapping aspect ("MF", "BP", "CC") to a list of individual
+        URIs. Aspect keys are absent when no backbone match is found. Lists are
+        typically length 1 (longer surfaces anomalies, like get_primary_go_terms).
+        """
+        primary = {}
+        for edge in annot.edges.values():
+            role = self._backbone_role(edge)
+            if role == "MF":
+                # MF backbone -> primary MF individual is the source (the MF node)
+                primary.setdefault("MF", []).append(edge.source_uri)
+            elif role == "BP":
+                # BP backbone -> primary BP individual is the target
+                primary.setdefault("BP", []).append(edge.target_uri)
+            elif role == "CC":
+                # CC backbone -> primary CC individual is the target
+                primary.setdefault("CC", []).append(edge.target_uri)
+        return primary
+
+    def _anatomy_attachment_is_simple(self, annot: StandardAnnotation) -> bool:
+        """
+        Return True if every connected anatomy region in `annot` attaches to the
+        rest of the model through at most one boundary edge.
+
+        An anatomy region is a connected component of anatomical individuals
+        (_is_anatomical_structure: GO cellular components + anatomy-ontology terms
+        such as CL/UBERON/EMAPA), joined by *internal* edges (both endpoints
+        anatomical -- the part_of chains). A *boundary* edge has exactly one
+        anatomical endpoint (it links the region to a non-anatomy node, e.g. a
+        primary BP -occurs_in-> CL placement, or a stray
+        BP -results_in_development_of-> anatomy edge). Boundary edges are counted
+        as distinct (source_uri, property_uri, target_uri) triples, so a
+        multi-evidence placement (two axiom bnodes, same triple) counts once.
+
+        A region with more than one boundary edge signals a complex (e.g.
+        developmental) subgraph that should not be auto-de-nested; this returns
+        False for the whole annotation in that case.
+        """
+        # 1. Anatomical flag per individual, from edge endpoint types.
+        is_anat = {}
+        for e in annot.edges.values():
+            if e.source_uri is not None:
+                is_anat[e.source_uri] = self._is_anatomical_structure(e.source_type)
+            if e.target_uri is not None:
+                is_anat[e.target_uri] = self._is_anatomical_structure(e.target_type)
+
+        # 2. Union-find over anatomical individuals joined by internal edges.
+        parent = {u: u for u, a in is_anat.items() if a}
+
+        def find(x):
+            while parent[x] != x:
+                parent[x] = parent[parent[x]]
+                x = parent[x]
+            return x
+
+        def union(a, b):
+            parent[find(a)] = find(b)
+
+        for e in annot.edges.values():
+            if is_anat.get(e.source_uri) and is_anat.get(e.target_uri):
+                union(e.source_uri, e.target_uri)
+
+        # 3. Distinct boundary edges per region (exactly one anatomical endpoint).
+        boundary = {}
+        for e in annot.edges.values():
+            s_anat = is_anat.get(e.source_uri, False)
+            t_anat = is_anat.get(e.target_uri, False)
+            if s_anat != t_anat:
+                anat_node = e.source_uri if s_anat else e.target_uri
+                root = find(anat_node)
+                boundary.setdefault(root, set()).add(
+                    (e.source_uri, e.property_uri, e.target_uri))
+
+        # 4. Simple iff every region has at most one boundary edge.
+        return all(len(edges) <= 1 for edges in boundary.values())
+
+    def _walk_extension_chain(self, annot: StandardAnnotation,
+                              edge: StandardAnnotationEdge):
+        """
+        Walk the extension chain backwards from `edge.source_uri` to the backbone
+        individual where the chain departs from the backbone.
+
+        A backbone individual is any endpoint of a backbone edge (_backbone_role
+        is not None). Returns (start_uri, start_type, relations), where `relations`
+        is the ordered list of property URIs traversed from `edge.source_uri` up to
+        the backbone -- nearest edge first, the *direct extension edge* leaving the
+        backbone last (so relations[-1] is the chain-start relation). The list does
+        NOT include `edge`'s own property (the walk starts at its source).
+
+        Returns None when the chain start is ambiguous: a traversed node has != 1
+        extension-edge predecessor, a cycle is hit, or no backbone individual is
+        reached before running out of predecessors.
+        """
+        extension_edges = self.get_extension_edges(annot)
+        backbone_individuals = set()
+        uri_to_type = {}
+        for e in annot.edges.values():
+            uri_to_type[e.source_uri] = e.source_type
+            uri_to_type[e.target_uri] = e.target_type
+            if self._backbone_role(e) is not None:
+                backbone_individuals.add(e.source_uri)
+                backbone_individuals.add(e.target_uri)
+
+        current = edge.source_uri
+        relations = []
+        visited = set()
+        while current not in backbone_individuals:
+            if current in visited:
+                return None  # cycle
+            visited.add(current)
+            preds = [e for e in extension_edges if e.target_uri == current]
+            if len(preds) != 1:
+                return None  # ambiguous / dead-end
+            relations.append(preds[0].property_uri)
+            current = preds[0].source_uri
+        if not relations:
+            return None  # edge.source_uri was already a backbone node
+        return current, uri_to_type.get(current), relations
+
+    def _extension_chain_start(self, annot: StandardAnnotation,
+                               edge: StandardAnnotationEdge):
+        """
+        Thin wrapper over _walk_extension_chain returning the extension-start
+        individual and the *chain-start relation* (the property of the direct
+        extension edge leaving the backbone). Returns (start_uri, start_type,
+        relation_uri) on success, or None when the chain start is ambiguous.
+        """
+        walk = self._walk_extension_chain(annot, edge)
+        if walk is None:
+            return None
+        start_uri, start_type, relations = walk
+        return start_uri, start_type, relations[-1]
+
+    def _nested_chain_is_repointable(self, edge: StandardAnnotationEdge, relations):
+        """
+        Decide whether a nested anatomy edge's extension chain may be de-nested by
+        *re-pointing* its source (vs. deleted).
+
+        `relations` is the list from _walk_extension_chain (nearest-first, so
+        relations[-1] is the chain-start relation leaving the backbone). A chain is
+        re-pointable iff the chain-start relation is occurs_in, part_of, or
+        is_active_in AND every *other* relation in the chain -- the intermediate
+        hops (relations[:-1]) and the nested edge's own relation -- is part_of.
+
+        Chains that depart via any other relation (e.g. results_in_specification_of)
+        are NOT re-pointable; the caller deletes them instead, because inheriting a
+        non-containment relation onto the de-nested edge would fabricate a wrong
+        assertion.
+        """
+        allowed_start = {str(self.rel_occurs_in), str(self.rel_part_of),
+                         str(self.rel_is_active_in)}
+        if str(relations[-1]) not in allowed_start:
+            return False
+        rest = list(relations[:-1]) + [edge.property_uri]
+        return all(str(r) == str(self.rel_part_of) for r in rest)
+
+    def plan_nested_anatomy_fixes(self, gocam: GoCamGraph, warn: bool = True) -> list:
+        """
+        Build a list of rewrite instructions for nested anatomy extension edges.
+
+        For every annotation (standard and non-standard), find extension edges
+        whose source is not the lead-aspect primary term (nested) and whose source
+        and target types are both anatomical structures (_is_anatomical_structure).
+        Each such edge yields one instruction with an `action`:
+
+        - "rewrite": when the extension chain is re-pointable
+          (_nested_chain_is_repointable) -- its chain-start relation is
+          occurs_in/part_of/is_active_in and every other chain relation is part_of.
+          The edge is re-pointed onto the extension-start individual (the backbone
+          individual where the chain departs), inheriting the chain-start relation
+          (typically occurs_in for MF/BP-led and part_of for CC-led).
+        - "delete": when the chain departs via any other relation (e.g.
+          results_in_specification_of). Re-pointing would fabricate a wrong
+          assertion, so the nested edge is deleted instead (new_source_uri /
+          new_property_uri / new_source_type are None). The caller
+          (GoCamGraph.delete_edge + prune_orphan_individuals) removes the edge and
+          any individual it orphans.
+
+        Annotations whose lead aspect has 0 or >1 primary individual are skipped
+        with a warning (ambiguous attach point).
+
+        Returns a list of instruction dicts with keys: model_id, title,
+        lead_aspect, primary_term, bnode_id, old_source_uri, old_property_uri,
+        target_uri, new_source_uri, new_property_uri, new_source_type,
+        old_source_type, target_type, action.
+        """
+        plan = []
+        all_annots = gocam.standard_annotations + gocam.non_standard_annotations
+        for annot in all_annots:
+            lead, nested = find_nested_extensions(annot, self)
+            if not nested:
+                continue
+            if not self._anatomy_attachment_is_simple(annot):
+                if warn:
+                    print(f"WARNING: skipping annotation in {gocam.model_id} "
+                          f"({gocam.title}) — anatomy has multiple attachment "
+                          f"points (complex subgraph)")
+                continue
+            primary_individuals = self.get_primary_individuals(annot).get(lead, [])
+            if len(primary_individuals) != 1:
+                if warn:
+                    print(f"WARNING: skipping annotation in {gocam.model_id} "
+                          f"({gocam.title}) — expected 1 primary {lead} individual, "
+                          f"found {len(primary_individuals)}")
+                continue
+            # `lead` came from find_nested_extensions -> pick_lead_aspect over
+            # get_primary_go_terms, so it is guaranteed to be a present key here.
+            primary_term = self.get_primary_go_terms(annot)[lead][0]
+            for edge in nested:
+                if not (self._is_anatomical_structure(edge.source_type)
+                        and self._is_anatomical_structure(edge.target_type)):
+                    continue
+                # Walk the extension chain back to the backbone individual where it
+                # departs (the "extension starting individual").
+                walk = self._walk_extension_chain(annot, edge)
+                if walk is None:
+                    if warn:
+                        print(f"WARNING: skipping nested edge in {gocam.model_id} "
+                              f"({gocam.title}) — ambiguous extension chain start")
+                    continue
+                start_uri, start_type, relations = walk
+                if self._nested_chain_is_repointable(edge, relations):
+                    # Re-point onto the extension-start individual, inheriting the
+                    # relation of the edge leaving it -- NOT the lead-aspect primary.
+                    action = "rewrite"
+                    new_source_uri = start_uri
+                    new_source_type = start_type
+                    new_property = relations[-1]
+                else:
+                    # Chain departs via a non-containment relation (e.g.
+                    # results_in_specification_of): cannot re-point safely, so
+                    # delete the nested edge instead.
+                    action = "delete"
+                    new_source_uri = None
+                    new_source_type = None
+                    new_property = None
+                plan.append({
+                    "model_id": gocam.model_id,
+                    "title": gocam.title,
+                    "lead_aspect": lead,
+                    "primary_term": primary_term,
+                    "bnode_id": edge.bnode_id,
+                    "old_source_uri": edge.source_uri,
+                    "old_property_uri": edge.property_uri,
+                    "target_uri": edge.target_uri,
+                    "new_source_uri": new_source_uri,
+                    "new_property_uri": new_property,
+                    "new_source_type": new_source_type,
+                    "old_source_type": edge.source_type,
+                    "target_type": edge.target_type,
+                    "action": action,
+                })
+        return plan
+
+    def compute_model_stats(self, gocam: GoCamGraph, model_id: str,
+                            extended: bool = False) -> ModelStats:
+        """
+        Compute per-model statistics (no I/O). `model_id` is the exact "Model ID"
+        cell the caller wants (e.g. "gomodel:" + filename stem). When `extended`
+        is True, also compute the triage fields (nested buckets, per-check failure
+        counts, fixable counts) used by the debug stats report.
+        """
+        std = gocam.standard_annotations
+        nonstd = gocam.non_standard_annotations
+        all_annots = std + nonstd
+
+        std_multi = sum(1 for a in std if a.has_muliple_evidence())
+        multi_ev_terms = set()
+        for a in std:
+            if a.has_muliple_evidence():
+                for edge in a.edges.values():
+                    for t in (edge.source_type, edge.target_type):
+                        if t:
+                            label = self.term_label(t)
+                            # skip URIs and CURIEs (keep only resolved labels)
+                            if label and not label.startswith("http") and ":" not in label:
+                                multi_ev_terms.add(label)
+        nonstd_multi = sum(1 for a in nonstd if a.has_muliple_evidence())
+        mf_causal_edges = sum(len(a.failed_checks.get("mf_causal_mf", set()))
+                              for a in nonstd)
+        no_ev_edges = sum(1 for a in all_annots
+                          for e in a.edges.values() if not e.evidence_uris)
+
+        stats = ModelStats(
+            model_id=model_id,
+            title=gocam.title,
+            standard_count=len(std),
+            non_standard_count=len(nonstd),
+            multi_evidence_count=std_multi + nonstd_multi,
+            mixed_annotation_type=bool(std) and bool(nonstd),
+            mf_causal_edge_count=mf_causal_edges,
+            no_evidence_edge_count=no_ev_edges,
+            modelstate=gocam.modelstate,
+            groups=list(gocam.groups or []),
+            multi_evidence_go_terms=sorted(multi_ev_terms),
+            std_multi_evidence_count=std_multi,
+        )
+        if not extended:
+            return stats
+
+        # per-check annotation-level counts (number of annotations with >=1
+        # failure of each check)
+        for a in all_annots:
+            for name in a.failed_checks:
+                if name in stats.failure_counts:
+                    stats.failure_counts[name] += 1
+
+        # nested-extension bucket counts, by lead aspect (BP > CC > MF)
+        nested = {"MF": 0, "BP": 0, "CC": 0}
+        for a in all_annots:
+            lead, nested_edges = find_nested_extensions(a, self)
+            if nested_edges:
+                nested[lead] += 1
+        stats.nested_mf_count = nested["MF"]
+        stats.nested_bp_count = nested["BP"]
+        stats.nested_cc_count = nested["CC"]
+
+        # fixable counts — reuse the real planner so this can't diverge from the
+        # fixer. An annotation is a "fixer target" iff the planner would rewrite
+        # one of its edges (bnode-id membership). Standard targets are fixable;
+        # non-standard targets are fixable only when every failing check is
+        # attributable to the nesting (NESTING_ATTRIBUTABLE_CHECKS).
+        fixer_bnodes = {r["bnode_id"]
+                        for r in self.plan_nested_anatomy_fixes(gocam, warn=False)}
+        for a in all_annots:
+            if not any(bnid in fixer_bnodes for bnid in a.edges):
+                continue
+            if not a.failed_checks:
+                stats.fixable_standard_count += 1
+            elif set(a.failed_checks) <= NESTING_ATTRIBUTABLE_CHECKS:
+                stats.fixable_nonstandard_count += 1
+
+        return stats
 
     def parse_ttl(self, ttl_filename):
         gocam = GoCamGraph()
@@ -1196,6 +1829,19 @@ class GoCamGraphBuilder:
                             failed_checks.setdefault(rule["key"], set()).add(edge.bnode_id)
                         break
 
+            # Check #14: the annotation subgraph must contain at least one gene
+            # product. A standard annotation links a GP to GO; a subgraph with no
+            # GP at all (e.g. a bare anatomy/chemical placement) is non-standard.
+            # All edges are recorded (annotation-level failure). std_annot always
+            # has >= 1 edge -- it is created only when an edge is added.
+            has_gp = any(
+                self._gene_product_namespace_key(t) in self.GP_NAMESPACE_KEYS
+                for edge in std_annot.edges.values()
+                for t in (edge.source_type, edge.target_type)
+            )
+            if not has_gp:
+                failed_checks["no_gp_at_all"] = set(std_annot.edges.keys())
+
             std_annot.failed_checks = failed_checks
 
             # Categorize annotation
@@ -1207,6 +1853,69 @@ class GoCamGraphBuilder:
         go_cam_graph.standard_annotations = new_standard_annotations
         go_cam_graph.non_standard_annotations = non_standard_annotations
         return go_cam_graph
+
+    def _fetch_label_from_ols(self, uri, curie):
+        """Query OLS4 for the label of ``uri``; return the label or None.
+
+        Never raises: network errors, non-2xx responses, and unparseable JSON
+        are treated as a miss (None). After OLS4_MAX_CONSECUTIVE_FAILURES
+        consecutive failures the API is disabled for the rest of the run so a
+        fully offline run does not make one doomed call per unique term.
+        """
+        if self._api_disabled:
+            return None
+        if self._api_session is None:
+            self._api_session = requests.Session()
+            self._api_session.headers.update(
+                {"User-Agent": "go-cam-evidence-unwinder/label-resolver"})
+        try:
+            resp = self._api_session.get(
+                self.OLS4_TERMS_URL,
+                params={"iri": str(uri), "size": 20},
+                timeout=self.OLS4_TIMEOUT,
+            )
+            resp.raise_for_status()
+            terms = resp.json().get("_embedded", {}).get("terms", [])
+            label = self._select_label(terms, curie)
+            self._api_consecutive_failures = 0   # reset on any successful response
+            return label
+        except (requests.RequestException, ValueError, AttributeError, TypeError):
+            self._api_consecutive_failures += 1
+            if self._api_consecutive_failures >= self.OLS4_MAX_CONSECUTIVE_FAILURES:
+                self._api_disabled = True
+            return None
+
+    def _select_label(self, terms, curie):
+        """Pick the best human-readable label from an OLS4 _embedded.terms list.
+
+        The same IRI may appear in several ontologies; importing ontologies
+        sometimes carry a junk label equal to the bare ID fragment. Priority:
+          1. a term flagged is_defining_ontology with a "real" label;
+          2. a term whose ontology_name matches the CURIE prefix (lowercased);
+          3. the first term with any "real" label;
+          4. None (caller falls back to the CURIE).
+        A label is "real" iff it is non-empty and not equal to the bare ID
+        fragment ("CL_0000540") or the CURIE itself ("CL:0000540").
+        """
+        if not terms:
+            return None
+        local_id = curie.replace(":", "_")          # "CL:0000540" -> "CL_0000540"
+        prefix = curie.split(":", 1)[0].lower()     # "CL:0000540" -> "cl"
+
+        def is_real(term):
+            label = term.get("label")
+            return bool(label) and label != local_id and label != curie
+
+        for term in terms:                          # rule 1
+            if term.get("is_defining_ontology") and is_real(term):
+                return term.get("label")
+        for term in terms:                          # rule 2
+            if term.get("ontology_name", "").lower() == prefix and is_real(term):
+                return term.get("label")
+        for term in terms:                          # rule 3
+            if is_real(term):
+                return term.get("label")
+        return None                                 # rule 4
 
     def term_label(self, uri: URIRef) -> str:
         """
@@ -1232,6 +1941,16 @@ class GoCamGraphBuilder:
             # Look up rdfs:label in the RO graph
             for label in self.ro_ontology.objects(uri, rdflib.RDFS.label):
                 return str(label)
+
+        # API fallback for terms not in the local GO/RO ontologies (anatomy:
+        # CL/UBERON/EMAPA/WBbt/..., plus CHEBI/ECO/PR/...). Cache hits and
+        # misses so any IRI is queried at most once per run.
+        if self.resolve_labels_api:
+            iri = str(uri)
+            if iri not in self._api_label_cache:
+                self._api_label_cache[iri] = self._fetch_label_from_ols(uri, curie)
+            if self._api_label_cache[iri]:
+                return self._api_label_cache[iri]
 
         # Fall back to CURIE
         return str(curie)
@@ -1260,8 +1979,19 @@ class GoCamGraphBuilder:
             print("\t".join(r), file=report_file)
 
 
-if __name__ == "__main__":
+def main():
     args = parser.parse_args()
+
+    # These are independent transformations of the source models and must not share
+    # one invocation: the fixer would run on the already-split in-memory graph (whose
+    # annotation objects were built pre-split) and overwrite the split output. Run them
+    # as separate passes instead (e.g. the `models_split` and `fix_nested_anatomy`
+    # Makefile targets, each with its own --output-dir). Checked before the (slow)
+    # ontology load so it fails fast.
+    if args.split_evidence and args.fix_nested_anatomy:
+        parser.error("--split-evidence and --fix-nested-anatomy cannot be combined in "
+                     "one invocation; run them as separate passes with separate "
+                     "--output-dir directories.")
 
     # Load model ID list if provided
     model_id_filter = None
@@ -1283,7 +2013,8 @@ if __name__ == "__main__":
             model_id_filter=model_id_filter,
         )
 
-    go_cam_graph_builder = GoCamGraphBuilder(args.ontology_filename, args.ro_filename, args.groups_yaml)
+    go_cam_graph_builder = GoCamGraphBuilder(args.ontology_filename, args.ro_filename, args.groups_yaml,
+                                             resolve_labels_api=not args.no_label_api)
 
     # Open report file if specified, otherwise use stdout
     report_file = None
@@ -1293,9 +2024,10 @@ if __name__ == "__main__":
     else:
         output = sys.stdout
 
-    # Always print statistics header
-    headers = ["Model ID", "Title", "Standard Annotations", "Non-Standard Annotations", "Multi-Evidence Annotations", "Mixed Annotation Type", "MF-causal->MF Edges", "Edges w/o Evidence", "Model State", "Groups", "Multi-Evidence GO Terms"]
-    print("\t".join(headers), file=output)
+    # Statistics report: extended by default, base columns with --basic-report.
+    extended = not args.basic_report
+    stats_header = ModelStats.extended_header() if extended else ModelStats.base_header()
+    print("\t".join(stats_header), file=output)
 
     fail_report_file = None
     criteria_fail_output = None
@@ -1305,10 +2037,19 @@ if __name__ == "__main__":
         crit_fail_report_headers = ["Model ID", "Title", "Reason", "Source", "Predicate", "Object"]
         print("\t".join(crit_fail_report_headers), file=criteria_fail_output)
 
-    if args.split_evidence and args.output_dir:
+    if (args.split_evidence or args.fix_nested_anatomy) and args.output_dir:
         os.makedirs(args.output_dir, exist_ok=True)
 
     all_date_change_records = []
+    all_nested_fix_records = []
+
+    # Remainders report accumulators. Imported here (not at module top) to avoid
+    # an import cycle: remainders_report imports find_nested_extensions from this
+    # module, which is only fully defined once this module finishes loading.
+    from gocam_unwinder import remainders_report
+    remainders_rows = []
+    remainders_bucket_hits = []
+    total_non_std = 0
 
     for f in model_files:
         gocam_graph = go_cam_graph_builder.parse_ttl(f)
@@ -1320,67 +2061,27 @@ if __name__ == "__main__":
         filename = os.path.basename(f)
         model_id = filename.split(".")[0]
 
-        # Print statistics
-        mixed_annotation_type = "No"
-        if gocam_graph.standard_annotations and gocam_graph.non_standard_annotations:
-            mixed_annotation_type = "Yes"
+        # Compute per-model statistics (extended fields unless --basic-report)
+        stats = go_cam_graph_builder.compute_model_stats(
+            gocam_graph, "gomodel:" + model_id, extended=extended)
 
-        # Count annotations with multiple evidence on at least one edge
-        # Also collect GO term labels for terms in multi-evidence annotations
-        std_multi_evidence_count = 0
-        multi_evidence_go_terms = set()
-        for std_annot in gocam_graph.standard_annotations:
-            if std_annot.has_muliple_evidence():
-                std_multi_evidence_count += 1
-                # Collect GO term labels from all edges in this annotation
-                # Skip URIs and CURIEs (only include resolved human-readable labels)
-                for edge in std_annot.edges.values():
-                    if edge.source_type:
-                        label = go_cam_graph_builder.term_label(edge.source_type)
-                        # Skip if URI, CURIE (contains ':'), or empty
-                        if label and not label.startswith("http") and ":" not in label:
-                            multi_evidence_go_terms.add(label)
-                    if edge.target_type:
-                        label = go_cam_graph_builder.term_label(edge.target_type)
-                        if label and not label.startswith("http") and ":" not in label:
-                            multi_evidence_go_terms.add(label)
-
-        # Also compute multi_evidence_count for non-standard annotations
-        non_std_multi_evidence_count = 0
-        for non_std_annot in gocam_graph.non_standard_annotations:
-            if non_std_annot.has_muliple_evidence():
-                non_std_multi_evidence_count += 1
-
-        # This is what goes in the Multi-Evidence Annotations column
-        report_multi_evidence_count = std_multi_evidence_count + non_std_multi_evidence_count
-
-        # Count MF causal edges in non-standard annotations
-        mf_causal_count = 0
-        for non_std_annot in gocam_graph.non_standard_annotations:
-            for causal_bnode_id in non_std_annot.failed_checks.get("mf_causal_mf", set()):
-                mf_causal_count += 1
-
-        # Count edges without evidence across all annotations
-        no_evidence_edge_count = 0
-        all_annotations = gocam_graph.standard_annotations + gocam_graph.non_standard_annotations
-        for annot in all_annotations:
-            for edge in annot.edges.values():
-                if len(edge.evidence_uris) == 0:
-                    no_evidence_edge_count += 1
-
-        if mixed_annotation_type == "Yes" and criteria_fail_output:
+        if criteria_fail_output:
             # print standard annotation fail_checks by edge
-            go_cam_graph_builder.print_non_standard_annotation_failed_checks(gocam_graph, report_file=criteria_fail_output)
+            go_cam_graph_builder.print_non_standard_annotation_failed_checks(
+                gocam_graph, report_file=criteria_fail_output)
 
-        # Format multi-evidence GO terms as pipe-separated list
-        multi_ev_terms_str = "|".join(sorted(multi_evidence_go_terms)) if multi_evidence_go_terms else ""
-        # Format groups as pipe-separated list
-        groups_str = "|".join(gocam_graph.groups) if gocam_graph.groups else ""
-        modelstate_str = gocam_graph.modelstate or ""
-        print("\t".join(["gomodel:"+model_id, gocam_graph.title, str(len(gocam_graph.standard_annotations)), str(len(gocam_graph.non_standard_annotations)), str(report_multi_evidence_count), mixed_annotation_type, str(mf_causal_count), str(no_evidence_edge_count), modelstate_str, groups_str, multi_ev_terms_str]), file=output)
+        row = stats.to_extended_row() if extended else stats.to_base_row()
+        print("\t".join(row), file=output)
+
+        if args.remainders_report:
+            rows, hits = remainders_report.collect_model_remainders(
+                go_cam_graph_builder, gocam_graph)
+            remainders_rows.extend(rows)
+            remainders_bucket_hits.extend(hits)
+            total_non_std += len(gocam_graph.non_standard_annotations)
 
         # Split evidence if requested and model contains standard annotations having multiple evidence edges
-        if args.split_evidence and std_multi_evidence_count >= 1:
+        if args.split_evidence and stats.std_multi_evidence_count >= 1:
             if args.output_dir:
                 output_filename = os.path.join(args.output_dir, filename)
             else:
@@ -1391,6 +2092,40 @@ if __name__ == "__main__":
             date_records = gocam_graph.split_evidence_and_write_ttl(output_filename)
             all_date_change_records.extend(date_records)
             print(f"Split evidence for {filename} -> {output_filename}")
+
+        # Fix nested anatomy extensions if requested (independent of --split-evidence)
+        if args.fix_nested_anatomy:
+            nested_plan = go_cam_graph_builder.plan_nested_anatomy_fixes(gocam_graph)
+            if nested_plan:
+                orphan_candidates = []
+                for rec in nested_plan:
+                    if rec.get("action") == "delete":
+                        removed_evidence = gocam_graph.delete_edge(
+                            rec["bnode_id"], rec["old_source_uri"],
+                            rec["old_property_uri"], rec["target_uri"])
+                        orphan_candidates.append(rec["old_source_uri"])
+                        orphan_candidates.append(rec["target_uri"])
+                        orphan_candidates.extend(removed_evidence)
+                    else:
+                        gocam_graph.rewrite_edge_source_and_relation(
+                            rec["bnode_id"], rec["old_source_uri"], rec["old_property_uri"],
+                            rec["target_uri"], rec["new_source_uri"], rec["new_property_uri"])
+                if orphan_candidates:
+                    gocam_graph.prune_orphan_individuals(orphan_candidates)
+                all_nested_fix_records.extend(nested_plan)
+                if args.output_dir:
+                    fix_output_filename = os.path.join(args.output_dir, filename)
+                else:
+                    fix_output_filename = os.path.splitext(f)[0] + "_nested_fixed.ttl"
+                gocam_graph.write_ttl(fix_output_filename)
+                print(f"Fixed nested anatomy for {filename} -> {fix_output_filename} ({len(nested_plan)} edges)")
+
+    # Write remainders report if requested
+    if args.remainders_report:
+        remainders_report.write_remainders_tsv(args.remainders_report, remainders_rows)
+        remainders_report.print_bucket_summary(remainders_bucket_hits, total_non_std)
+        print(f"\nRemainders report written to {args.remainders_report} "
+              f"({len(remainders_rows)} rows)")
 
     # Write date change report if requested
     if args.date_change_report and all_date_change_records:
@@ -1405,9 +2140,32 @@ if __name__ == "__main__":
                         source_label, pred_label, target_label]
                 print("\t".join(cols), file=dcr_file)
 
+    # Write nested-anatomy fix report if requested
+    if args.nested_fix_report and all_nested_fix_records:
+        with open(args.nested_fix_report, 'w') as nfr_file:
+            nfr_headers = ["Model ID", "Title", "Lead Aspect", "Primary Term",
+                           "Old Source", "Old Relation", "Target",
+                           "New Source", "New Relation", "Action"]
+            print("\t".join(nfr_headers), file=nfr_file)
+            for rec in all_nested_fix_records:
+                primary_label = go_cam_graph_builder.term_label(rec["primary_term"]) if rec["primary_term"] else ""
+                old_source_label = go_cam_graph_builder.term_label(rec["old_source_type"]) if rec["old_source_type"] else ""
+                old_rel_label = go_cam_graph_builder.term_label(rec["old_property_uri"]) if rec["old_property_uri"] else ""
+                target_label = go_cam_graph_builder.term_label(rec["target_type"]) if rec["target_type"] else ""
+                new_source_label = go_cam_graph_builder.term_label(rec["new_source_type"]) if rec.get("new_source_type") else ""
+                new_rel_label = go_cam_graph_builder.term_label(rec["new_property_uri"]) if rec["new_property_uri"] else ""
+                cols = [rec["model_id"], rec["title"], rec["lead_aspect"], primary_label,
+                        old_source_label, old_rel_label, target_label,
+                        new_source_label, new_rel_label, rec.get("action", "rewrite")]
+                print("\t".join(cols), file=nfr_file)
+
     # Close report file if it was opened
     if report_file:
         report_file.close()
 
     if fail_report_file:
         fail_report_file.close()
+
+
+if __name__ == "__main__":
+    main()

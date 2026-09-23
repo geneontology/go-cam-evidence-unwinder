@@ -15,4 +15,5 @@ def builder():
     whole test run. parse_ttl() builds a fresh GoCamGraph and only reads from the
     builder, so sharing one instance across tests is safe.
     """
-    return GoCamGraphBuilder(ONTOLOGY_FILE, RO_ONTOLOGY_FILE, GROUPS_YAML_FILE)
+    return GoCamGraphBuilder(ONTOLOGY_FILE, RO_ONTOLOGY_FILE, GROUPS_YAML_FILE,
+                             resolve_labels_api=False)

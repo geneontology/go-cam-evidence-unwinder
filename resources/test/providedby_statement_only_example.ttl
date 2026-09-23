@@ -1,0 +1,12 @@
+<http://model.geneontology.org/providedby_statement_only_example> a <http://www.w3.org/2002/07/owl#Ontology> ;
+	<http://geneontology.org/lego/modelstate> "production" ;
+	<http://purl.org/dc/elements/1.1/title> "Statement-only providedBy fixture" .
+
+<http://purl.org/pav/providedBy> a <http://www.w3.org/2002/07/owl#AnnotationProperty> .
+<http://geneontology.org/lego/evidence> a <http://www.w3.org/2002/07/owl#AnnotationProperty> .
+
+# Group provenance is recorded ONLY on the evidence individual, not on the model
+# (Ontology) node above -- mirrors MGI_MGI_104518 and ~100 other corpus models.
+<http://model.geneontology.org/providedby_statement_only_example/ev1>
+	a <http://www.w3.org/2002/07/owl#NamedIndividual> , <http://purl.obolibrary.org/obo/ECO_0000314> ;
+	<http://purl.org/pav/providedBy> "http://informatics.jax.org" .

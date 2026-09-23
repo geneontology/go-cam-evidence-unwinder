@@ -34,3 +34,19 @@
 	<http://geneontology.org/lego/evidence> <http://model.geneontology.org/mf_occurs_in_anatomy_example/ev1> ;
 	<http://purl.org/dc/elements/1.1/contributor> "https://orcid.org/0000-0003-3394-9805" ;
 	<http://purl.org/dc/elements/1.1/date> "2024-01-15" .
+
+# GP backbone so the passing annotation has a gene product (no_gp_at_all check)
+<http://model.geneontology.org/mf_occurs_in_anatomy_example/gp1>
+	a <http://www.w3.org/2002/07/owl#NamedIndividual> , <http://identifiers.org/mgi/MGI:1234567> .
+<http://model.geneontology.org/mf_occurs_in_anatomy_example/ev2>
+	a <http://www.w3.org/2002/07/owl#NamedIndividual> , <http://purl.obolibrary.org/obo/ECO_0000314> ;
+	<http://purl.org/dc/elements/1.1/contributor> "https://orcid.org/0000-0003-3394-9805" ;
+	<http://purl.org/dc/elements/1.1/date> "2024-01-15" ;
+	<http://purl.org/dc/elements/1.1/source> "PMID:22222222" .
+[] a <http://www.w3.org/2002/07/owl#Axiom> ;
+	<http://www.w3.org/2002/07/owl#annotatedSource> <http://model.geneontology.org/mf_occurs_in_anatomy_example/mf1> ;
+	<http://www.w3.org/2002/07/owl#annotatedProperty> <http://purl.obolibrary.org/obo/RO_0002333> ;
+	<http://www.w3.org/2002/07/owl#annotatedTarget> <http://model.geneontology.org/mf_occurs_in_anatomy_example/gp1> ;
+	<http://geneontology.org/lego/evidence> <http://model.geneontology.org/mf_occurs_in_anatomy_example/ev2> ;
+	<http://purl.org/dc/elements/1.1/contributor> "https://orcid.org/0000-0003-3394-9805" ;
+	<http://purl.org/dc/elements/1.1/date> "2024-01-15" .

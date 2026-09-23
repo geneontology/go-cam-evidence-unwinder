@@ -35,3 +35,15 @@
 	<http://www.w3.org/2002/07/owl#annotatedProperty> <http://purl.obolibrary.org/obo/RO_0001025> ;
 	<http://www.w3.org/2002/07/owl#annotatedTarget> <http://model.geneontology.org/bp_cc_relation_example/cl1> ;
 	<http://geneontology.org/lego/evidence> <http://model.geneontology.org/bp_cc_relation_example/ev2> .
+
+# GP backbone so the passing annotation has a gene product (no_gp_at_all check)
+<http://model.geneontology.org/bp_cc_relation_example/gp1>
+	a <http://www.w3.org/2002/07/owl#NamedIndividual> , <http://identifiers.org/mgi/MGI:1234567> .
+<http://model.geneontology.org/bp_cc_relation_example/ev3>
+	a <http://www.w3.org/2002/07/owl#NamedIndividual> , <http://purl.obolibrary.org/obo/ECO_0000314> ;
+	<http://purl.org/dc/elements/1.1/date> "2024-01-15" .
+[] a <http://www.w3.org/2002/07/owl#Axiom> ;
+	<http://www.w3.org/2002/07/owl#annotatedSource> <http://model.geneontology.org/bp_cc_relation_example/gp1> ;
+	<http://www.w3.org/2002/07/owl#annotatedProperty> <http://purl.obolibrary.org/obo/RO_0002264> ;
+	<http://www.w3.org/2002/07/owl#annotatedTarget> <http://model.geneontology.org/bp_cc_relation_example/bp1> ;
+	<http://geneontology.org/lego/evidence> <http://model.geneontology.org/bp_cc_relation_example/ev3> .
