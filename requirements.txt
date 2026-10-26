@@ -1,3 +1,4 @@
 rdflib
 ontobio>=2.8.8
 PyYAML
+requests

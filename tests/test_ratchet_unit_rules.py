@@ -93,4 +93,4 @@ def test_build_unit_rule_registry_has_all_checks():
     from gocam_unwinder.gocam_ttl import GoCamGraphBuilder
     reg = build_unit_rule_registry()
     assert set(reg) == {f"unit_{k}" for k in GoCamGraphBuilder.UNIT_CHECK_KEYS}
-    assert len(reg) == 12
+    assert len(reg) == 13

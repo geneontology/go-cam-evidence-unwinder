@@ -1,0 +1,62 @@
+<http://model.geneontology.org/mf_nested_anatomy_unfixable_example> a <http://www.w3.org/2002/07/owl#Ontology> ;
+	<http://geneontology.org/lego/modelstate> "production" ;
+	<http://purl.org/dc/elements/1.1/title> "MF-led nested anatomy with an unrelated GP->CC failure" ;
+	<http://purl.org/pav/providedBy> "http://informatics.jax.org" .
+
+<http://geneontology.org/lego/evidence> a <http://www.w3.org/2002/07/owl#AnnotationProperty> .
+<http://purl.org/dc/elements/1.1/date> a <http://www.w3.org/2002/07/owl#AnnotationProperty> .
+
+<http://model.geneontology.org/mf_nested_anatomy_unfixable_example/mf1>
+	a <http://www.w3.org/2002/07/owl#NamedIndividual> , <http://purl.obolibrary.org/obo/GO_0004672> ;
+	<http://purl.obolibrary.org/obo/RO_0002333> <http://model.geneontology.org/mf_nested_anatomy_unfixable_example/gp1> ;
+	<http://purl.obolibrary.org/obo/BFO_0000066> <http://model.geneontology.org/mf_nested_anatomy_unfixable_example/anat1> .
+<http://model.geneontology.org/mf_nested_anatomy_unfixable_example/gp1>
+	a <http://www.w3.org/2002/07/owl#NamedIndividual> , <http://identifiers.org/mgi/MGI:1234567> ;
+	<http://purl.obolibrary.org/obo/BFO_0000050> <http://model.geneontology.org/mf_nested_anatomy_unfixable_example/cc1> .
+<http://model.geneontology.org/mf_nested_anatomy_unfixable_example/cc1>
+	a <http://www.w3.org/2002/07/owl#NamedIndividual> , <http://purl.obolibrary.org/obo/GO_0005634> .
+<http://model.geneontology.org/mf_nested_anatomy_unfixable_example/anat1>
+	a <http://www.w3.org/2002/07/owl#NamedIndividual> , <http://purl.obolibrary.org/obo/CL_0000202> ;
+	<http://purl.obolibrary.org/obo/BFO_0000050> <http://model.geneontology.org/mf_nested_anatomy_unfixable_example/anat2> .
+<http://model.geneontology.org/mf_nested_anatomy_unfixable_example/anat2>
+	a <http://www.w3.org/2002/07/owl#NamedIndividual> , <http://purl.obolibrary.org/obo/EMAPA_17597> .
+<http://model.geneontology.org/mf_nested_anatomy_unfixable_example/ev1>
+	a <http://www.w3.org/2002/07/owl#NamedIndividual> , <http://purl.obolibrary.org/obo/ECO_0000314> ;
+	<http://purl.org/dc/elements/1.1/date> "2024-01-15" .
+<http://model.geneontology.org/mf_nested_anatomy_unfixable_example/ev2>
+	a <http://www.w3.org/2002/07/owl#NamedIndividual> , <http://purl.obolibrary.org/obo/ECO_0000314> ;
+	<http://purl.org/dc/elements/1.1/date> "2024-01-15" .
+<http://model.geneontology.org/mf_nested_anatomy_unfixable_example/ev3>
+	a <http://www.w3.org/2002/07/owl#NamedIndividual> , <http://purl.obolibrary.org/obo/ECO_0000314> ;
+	<http://purl.org/dc/elements/1.1/date> "2024-01-15" .
+<http://model.geneontology.org/mf_nested_anatomy_unfixable_example/ev4>
+	a <http://www.w3.org/2002/07/owl#NamedIndividual> , <http://purl.obolibrary.org/obo/ECO_0000314> ;
+	<http://purl.org/dc/elements/1.1/date> "2024-01-15" .
+
+# MF -enabled_by-> GP
+[] a <http://www.w3.org/2002/07/owl#Axiom> ;
+	<http://www.w3.org/2002/07/owl#annotatedSource> <http://model.geneontology.org/mf_nested_anatomy_unfixable_example/mf1> ;
+	<http://www.w3.org/2002/07/owl#annotatedProperty> <http://purl.obolibrary.org/obo/RO_0002333> ;
+	<http://www.w3.org/2002/07/owl#annotatedTarget> <http://model.geneontology.org/mf_nested_anatomy_unfixable_example/gp1> ;
+	<http://geneontology.org/lego/evidence> <http://model.geneontology.org/mf_nested_anatomy_unfixable_example/ev1> .
+
+# MF -occurs_in-> CL  (direct extension)
+[] a <http://www.w3.org/2002/07/owl#Axiom> ;
+	<http://www.w3.org/2002/07/owl#annotatedSource> <http://model.geneontology.org/mf_nested_anatomy_unfixable_example/mf1> ;
+	<http://www.w3.org/2002/07/owl#annotatedProperty> <http://purl.obolibrary.org/obo/BFO_0000066> ;
+	<http://www.w3.org/2002/07/owl#annotatedTarget> <http://model.geneontology.org/mf_nested_anatomy_unfixable_example/anat1> ;
+	<http://geneontology.org/lego/evidence> <http://model.geneontology.org/mf_nested_anatomy_unfixable_example/ev2> .
+
+# CL -part_of-> EMAPA  (NESTED, both anatomy) — fixer target
+[] a <http://www.w3.org/2002/07/owl#Axiom> ;
+	<http://www.w3.org/2002/07/owl#annotatedSource> <http://model.geneontology.org/mf_nested_anatomy_unfixable_example/anat1> ;
+	<http://www.w3.org/2002/07/owl#annotatedProperty> <http://purl.obolibrary.org/obo/BFO_0000050> ;
+	<http://www.w3.org/2002/07/owl#annotatedTarget> <http://model.geneontology.org/mf_nested_anatomy_unfixable_example/anat2> ;
+	<http://geneontology.org/lego/evidence> <http://model.geneontology.org/mf_nested_anatomy_unfixable_example/ev3> .
+
+# GP -part_of-> CC  (WRONG relation; GP->CC must be located_in) -> invalid_gp_cc_relation
+[] a <http://www.w3.org/2002/07/owl#Axiom> ;
+	<http://www.w3.org/2002/07/owl#annotatedSource> <http://model.geneontology.org/mf_nested_anatomy_unfixable_example/gp1> ;
+	<http://www.w3.org/2002/07/owl#annotatedProperty> <http://purl.obolibrary.org/obo/BFO_0000050> ;
+	<http://www.w3.org/2002/07/owl#annotatedTarget> <http://model.geneontology.org/mf_nested_anatomy_unfixable_example/cc1> ;
+	<http://geneontology.org/lego/evidence> <http://model.geneontology.org/mf_nested_anatomy_unfixable_example/ev4> .

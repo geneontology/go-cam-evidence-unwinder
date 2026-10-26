@@ -1,0 +1,37 @@
+<http://model.geneontology.org/no_gp_at_all_example> a <http://www.w3.org/2002/07/owl#Ontology> ;
+	<http://geneontology.org/lego/modelstate> "production" ;
+	<http://purl.org/dc/elements/1.1/title> "no_gp_at_all check fixture" ;
+	<http://purl.org/pav/providedBy> "http://informatics.jax.org" .
+
+<http://geneontology.org/lego/evidence> a <http://www.w3.org/2002/07/owl#AnnotationProperty> .
+<http://purl.org/dc/elements/1.1/date> a <http://www.w3.org/2002/07/owl#AnnotationProperty> .
+
+# Annotation A (NO GP): root-MF -is_active_in-> CC  (valid relation; only failure is no_gp_at_all)
+<http://model.geneontology.org/no_gp_at_all_example/mfA>
+	a <http://www.w3.org/2002/07/owl#NamedIndividual> , <http://purl.obolibrary.org/obo/GO_0003674> ;
+	<http://purl.obolibrary.org/obo/RO_0002432> <http://model.geneontology.org/no_gp_at_all_example/ccA> .
+<http://model.geneontology.org/no_gp_at_all_example/ccA>
+	a <http://www.w3.org/2002/07/owl#NamedIndividual> , <http://purl.obolibrary.org/obo/GO_0005634> .
+<http://model.geneontology.org/no_gp_at_all_example/evA>
+	a <http://www.w3.org/2002/07/owl#NamedIndividual> , <http://purl.obolibrary.org/obo/ECO_0000314> ;
+	<http://purl.org/dc/elements/1.1/date> "2024-01-15" .
+[] a <http://www.w3.org/2002/07/owl#Axiom> ;
+	<http://www.w3.org/2002/07/owl#annotatedSource> <http://model.geneontology.org/no_gp_at_all_example/mfA> ;
+	<http://www.w3.org/2002/07/owl#annotatedProperty> <http://purl.obolibrary.org/obo/RO_0002432> ;
+	<http://www.w3.org/2002/07/owl#annotatedTarget> <http://model.geneontology.org/no_gp_at_all_example/ccA> ;
+	<http://geneontology.org/lego/evidence> <http://model.geneontology.org/no_gp_at_all_example/evA> .
+
+# Annotation B (HAS GP): MF -enabled_by-> MGI GP  (standard; not flagged)
+<http://model.geneontology.org/no_gp_at_all_example/mfB>
+	a <http://www.w3.org/2002/07/owl#NamedIndividual> , <http://purl.obolibrary.org/obo/GO_0004672> ;
+	<http://purl.obolibrary.org/obo/RO_0002333> <http://model.geneontology.org/no_gp_at_all_example/gpB> .
+<http://model.geneontology.org/no_gp_at_all_example/gpB>
+	a <http://www.w3.org/2002/07/owl#NamedIndividual> , <http://identifiers.org/mgi/MGI:1234567> .
+<http://model.geneontology.org/no_gp_at_all_example/evB>
+	a <http://www.w3.org/2002/07/owl#NamedIndividual> , <http://purl.obolibrary.org/obo/ECO_0000314> ;
+	<http://purl.org/dc/elements/1.1/date> "2024-01-15" .
+[] a <http://www.w3.org/2002/07/owl#Axiom> ;
+	<http://www.w3.org/2002/07/owl#annotatedSource> <http://model.geneontology.org/no_gp_at_all_example/mfB> ;
+	<http://www.w3.org/2002/07/owl#annotatedProperty> <http://purl.obolibrary.org/obo/RO_0002333> ;
+	<http://www.w3.org/2002/07/owl#annotatedTarget> <http://model.geneontology.org/no_gp_at_all_example/gpB> ;
+	<http://geneontology.org/lego/evidence> <http://model.geneontology.org/no_gp_at_all_example/evB> .
