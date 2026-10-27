@@ -556,3 +556,107 @@ linking to `<noctua_base>gomodel:<id>`. All tables are click-to-sort.
   / SGD 7,832. The dominant unit filter `invalid_gp_cc_relation` (7,288) is
   overwhelmingly gene-products joined to protein complexes via `part_of` instead
   of `located_in` — a real curation signal.
+
+## 2026-10-26 axes: lines, contributors, complete failure sets, the ledger
+
+Purpose: the end state is that every GO-CAM model is either a true GO-CAM or a
+standard-annotation-only model. Models in between are frozen, their surviving
+annotations regenerated as GPAD into corrected models and re-consumed. The
+ratchet therefore quantifies what is lost, **where** (model, stage), **why**
+(the rule that removed it AND the complete set of failing checks), and **by
+whom** (editorial group, contributor ORCIDs), in **units and in estimated GPAD
+lines**, at model and annotation-unit level. Branch
+`local/std-annot-ratchet-axes`; full suite **112 passed** (97 + 15).
+
+### `gpad_lines_est` — the estimate's definition
+
+For one annotation unit, `gpad_lines_est = Σ over the unit's edges of
+len(edge.evidence_uris)`, i.e. the number of (edge, evidence individual) pairs
+over ALL the unit's edges (`unit_rules.gpad_lines_estimate`). Rationale:
+minerva's `--lego-to-gpad-sparql` emits one GPAD line per (backbone edge,
+evidence). Known bias: minerva folds extension edges (`occurs_in`, `has_input`,
+…) into the backbone line's extension column, so a unit whose extension edges
+carry their own evidence is **over-counted** here; an edge with no evidence
+contributes 0. It is named an estimate everywhere and
+`scripts/validate_gpad_lines.py` (`make ratchet-validate-lines GPAD_DIR=…`)
+measures it against a real per-model GPAD export (`<model_id>.gpad`, `!`
+lines are headers): per-model est vs actual, sum ratio, exact matches, median
+absolute error, worst models. Fixture check: every fixture's total equals its
+count of `lego:evidence` triples on reified axioms (MGI_MGI_1100089: 99;
+66c7d41500000016: 13 over 12 edges, one edge evidence-less).
+
+Where it is carried: unit `Item.meta`; every report row (`reports/*.jsonl`)
+and reject record (`*.rejects.tsv`, new columns `gpad_lines_est`,
+`contributors`, `all_failed_checks` after `detail`); the surviving manifest
+`SB-final.units.manifest.jsonl` (now full items with meta, not bare ids);
+`model_stats.jsonl` (`total_lines_est`, `passing_lines_est`); `summary.tsv`
+(`LinesIn`, `LinesRemoved`, `LinesOut` beside the unit columns); the dashboard
+cards, funnel rows, drill-down and model axes.
+
+**Phase A line totals.** Models removed in Phase A are parsed once by a cheap
+counting pass (`unit_rules.count_model`, same parser as Phase B, hooked into
+`run_stage(on_reject=…)`), so their unit / line / contributor totals land in
+the reject record and the summary. Exception: rules in `cli.SET_ASIDE_RULE_IDS`
+(`not_true_gocam`): true GO-CAMs are not losses, are never parsed, and are
+reported on a separate summary row with `Phase = A-set-aside` (`In = Out =`
+models set aside, `Removed = 0`, line cells empty = not estimated), emitted
+only when the rule set at least one model aside. Phase A line columns are
+filled backwards from the Phase B input total (`lines_out(i) = lines_in(i+1)`,
+`lines_in(i) = lines_out(i) + lines removed at i`, 0 for a set-aside rule), so
+the counted universe is "models that reach Phase B plus models removed by a
+non-set-aside rule"; the `not_true_gocam` stage row shows `LinesRemoved = 0`
+by construction. A Phase-A-only run (no `--go`) has no counting pass: all line
+cells are empty.
+
+### Contributors
+
+Checked on real `noctua-models` TTLs: `dc:contributor`
+(`http://purl.org/dc/elements/1.1/contributor`) appears on (1) the model-level
+`owl:Ontology` subject, (2) each evidence individual, (3) each reified
+`owl:Axiom` edge node, and (4) the activity / GP / term individuals. The ratchet
+takes **model contributors** from (1) (`unit_rules.model_contributors` →
+`model_stats.jsonl.contributors`) and **unit contributors** as the union of (2)
+and (3) over the unit's edges (`unit_rules.unit_contributors` → unit meta,
+reject records, manifests, ledger). Both are sorted lists of the literal values
+(ORCID URIs; occasionally legacy strings such as `GOC:tc`). `gocam_ttl.py` has
+no contributor accessor (`find_axiom_bits` returns axiom contributors but only
+inside `extract_edges`), so these read `gcg.g` directly; the smallest upstream
+change that would remove that is populating the commented-out
+`StandardAnnotationEdge.contributors` in `extract_edges`.
+
+### Complete failure set at reject time
+
+A unit is still removed at its FIRST failing stage (unchanged attribution,
+`removed_by_rule` / `rule`). On removal, `_run_phase_b` additionally runs
+`builder.run_all_checks(gcg, annotation)` and records `all_failed_checks`
+(sorted keys with a non-empty flagged set) in the report row, the reject record
+and the ledger. RO-dependent checks are empty when no RO is loaded.
+
+### Ledger and roll-ups (written beside `summary.tsv`)
+
+| file | one row per | columns |
+|---|---|---|
+| `ledger.tsv` | removed annotation unit | `model_id` (stem), `unit_index`, `modelstate`, `groups`, `contributors`, `removed_by_rule`, `all_failed_checks`, `edges`, `gpad_lines_est`, `title` (lists `\|`-joined) |
+| `ledger.by-group.tsv` | editorial group (`providedBy`; `(none)` bucket) | `group`, `total_units` (from `model_stats`), `lost_units`, `lost_lines_est`, then one lost-units column per unit rule in stage order |
+| `ledger.by-contributor.tsv` | contributor (`(none)` bucket) | `contributor`, `total_units` (every unit, surviving or removed, listing the contributor), `lost_units`, `lost_lines_est`, per-rule columns |
+| `models.partial.tsv` | model with `0 < passing < total` (freeze, regenerate survivors) | `model_id`, `modelstate`, `groups`, `total_units`, `passing_units`, `total_lines_est`, `passing_lines_est`, `title` |
+| `models.all-standard.tsv` | model with `passing == total > 0` | same |
+
+Counting rule: a unit with k contributors counts once in each of its k
+contributor rows, so contributor columns do not sum to the summary totals;
+group columns do while every model has at most one group. Sharded runs
+(`--jobs N`) concatenate `ledger.tsv` (header once) and **recompute** the
+roll-ups and model lists from the merged `ledger.tsv` +
+`SB-final.units.manifest.jsonl` + `model_stats.jsonl` (`cli._write_merged_rollups`),
+never by summing per-shard roll-ups. Delete the out-dir before re-running
+after this change (shard `.done` markers would otherwise serve the old files).
+
+### Dashboard
+
+Every count now has its estimated-line twin (cards, funnel rows, per-rule
+drill-down, model axes, model list), a set-aside note under Phase A, and a new
+"Where the losses land" section: by editorial group and by contributor (ORCIDs
+link out), top 25 with show-all, sortable, with a per-rule lost-units chip
+breakdown, read from the two roll-up files. Still one self-contained file. The
+reject-file lookup now also falls back to `phase-a/` / `phase-b/`, so a
+single-process (`make ratchet-smoke`) run gets drill-downs too.

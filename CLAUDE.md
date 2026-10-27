@@ -14,7 +14,11 @@ the whole noctua-models corpus down to standard annotations via a two-level,
 monotonic, sharded pipeline, with rules-as-data in `rules/` and a self-contained
 HTML dashboard (`gocam_unwinder.ratchet.dashboard`). Design, the corpus-run
 recipe, and findings live in
-`docs/plans/2026-06-25-standard-annotation-ratchet.md`.
+`docs/plans/2026-06-25-standard-annotation-ratchet.md`. For the loss accounting
+(estimated GPAD lines, contributors, `all_failed_checks`, `ledger.tsv` + roll-ups,
+`models.partial.tsv` / `models.all-standard.tsv`, `scripts/validate_gpad_lines.py`)
+read that doc's "2026-10-26 axes" section; `gpad_lines_est` is an estimate
+(one line per (edge, evidence) pair) and is to be named as such.
 
 **Contract for `gocam_ttl.py` editors:** `filter_out_non_std_annotations()` is now
 a thin loop over per-check callables `GoCamGraphBuilder.check_<key>(gcg, sa)`

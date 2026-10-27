@@ -13,21 +13,36 @@ rdflib graphs between unit stages while preserving the per-stage shrink.
 A unit survives all unit rules iff no check flags it iff it is a standard
 annotation -- so the final surviving unit set equals the union of every surviving
 model's standard annotations.
+
+Reporting axes (2026-10-26): every unit carries an estimated GPAD line count and
+its contributors; every removed unit's record carries the COMPLETE set of
+failing checks (not just the rule that removed it); Phase A removals get a cheap
+counting pass so the summary shows line totals per model stage too, except for
+the set-aside rules (``SET_ASIDE_RULE_IDS``), whose models are not losses.
 """
 
 import argparse
 import json
 from dataclasses import dataclass
 from pathlib import Path
-from typing import List
+from typing import List, Optional
 
 from .core import Item, Manifest
 from .engine import resolve_adapter
 from .model_rules import build_model_rule_registry, load_true_gocam_ids
 from .rules import load_rules
-from .runner import _write_jsonl, _write_rejects_tsv, run_stage
-from .summary import write_summary
-from .unit_rules import build_unit_rule_registry, parse_model_units
+from .runner import _write_jsonl, _write_rejects_tsv, report_row, run_stage
+from .summary import write_ledger, write_model_lists, write_rollups, write_summary
+from .unit_rules import (build_unit_rule_registry, count_model, model_contributors,
+                         parse_model_units)
+
+# Phase A rules whose removals are "set aside", not lost: true GO-CAMs stay as
+# they are in the end state, so their lines are neither counted nor parsed.
+# Their models are reported on a separate ``A-set-aside`` summary row.
+SET_ASIDE_RULE_IDS = frozenset({"not_true_gocam"})
+SET_ASIDE_PHASE = "A-set-aside"
+
+PHASE_ORDER = {"A": 0, SET_ASIDE_PHASE: 1, "B": 2}
 
 
 @dataclass
@@ -37,10 +52,20 @@ class StageStat:
     rule_id: str
     in_count: int
     out_count: int
+    # Estimated GPAD lines entering / leaving the stage; None = not estimated
+    # (no builder, so no counting pass) -- written as empty summary cells.
+    lines_in: Optional[int] = None
+    lines_out: Optional[int] = None
 
     @property
     def removed(self) -> int:
         return self.in_count - self.out_count
+
+    @property
+    def lines_removed(self) -> Optional[int]:
+        if self.lines_in is None or self.lines_out is None:
+            return None
+        return self.lines_in - self.lines_out
 
 
 @dataclass
@@ -51,10 +76,15 @@ class RatchetResult:
     out_dir: Path
 
 
+def _lines(units):
+    return sum(u.meta.get("gpad_lines_est", 0) for u in units)
+
+
 def _run_phase_b(builder, models_manifest, unit_rules, unit_registry, out_dir,
                  base_index=0):
     """Stream each surviving model's units through the ordered unit rules,
-    aggregating per-stage reports. Returns (stage_stats, final_unit_ids)."""
+    aggregating per-stage reports. Returns
+    (stage_stats, final_unit_items, model_records, ledger_rows)."""
     reports_dir = out_dir / "reports"
     reports_dir.mkdir(parents=True, exist_ok=True)
     adapters = [(j, rule, resolve_adapter(rule, unit_registry))
@@ -64,46 +94,67 @@ def _run_phase_b(builder, models_manifest, unit_rules, unit_registry, out_dir,
     rejects = [[] for _ in range(n)]
     in_count = [0] * n
     out_count = [0] * n
+    lines_in = [0] * n
+    lines_out = [0] * n
     final_units = []
     model_records = []
+    ledger_rows = []
 
     for item in models_manifest.items:
         gcg, units = parse_model_units(builder, item.path)
         total_units = len(units)
+        total_lines = _lines(units)
         current = units
         for j, rule, adapter in adapters:
             in_count[j] += len(current)
+            lines_in[j] += _lines(current)
             survivors = []
             for unit in current:
                 verdict = adapter.apply(unit, builder)
-                row = {
-                    "id": unit.id,
-                    "decision": ("skip" if verdict.skipped
-                                 else "keep" if verdict.keep else "remove"),
-                    "rule": rule.id,
-                    "model": unit.meta.get("model_id"),
-                }
-                if verdict.reason:
-                    row["reason"] = verdict.reason
-                row.update(verdict.detail)
-                rows[j].append(row)
+                if not verdict.keep:
+                    # The stage attribution stays with this rule; the complete
+                    # failing set answers "why" in full (a unit is removed at
+                    # its FIRST failing stage, so later failures are otherwise
+                    # invisible).
+                    checks = builder.run_all_checks(gcg, unit.payload["annotation"])
+                    verdict.detail["all_failed_checks"] = sorted(
+                        k for k, flagged in checks.items() if flagged)
+                    ledger_rows.append({
+                        "model_id": item.id,
+                        "unit_index": unit.meta.get("unit_index"),
+                        "modelstate": gcg.modelstate,
+                        "groups": gcg.groups or [],
+                        "contributors": unit.meta.get("contributors") or [],
+                        "removed_by_rule": rule.id,
+                        "all_failed_checks": verdict.detail["all_failed_checks"],
+                        "edges": unit.meta.get("edges"),
+                        "gpad_lines_est": unit.meta.get("gpad_lines_est"),
+                        "title": gcg.title,
+                    })
+                rows[j].append(report_row(unit, verdict, rule.id,
+                                          model=unit.meta.get("model_id")))
                 if verdict.keep:
                     survivors.append(unit)
                 else:
                     rejects[j].append((unit, verdict))
             out_count[j] += len(survivors)
+            lines_out[j] += _lines(survivors)
             current = survivors
-        final_units.extend(unit.id for unit in current)
+        final_units.extend(current)
         # Per-model stats for the dashboard's explorable axes (modelstate,
-        # editorial group, pass rate). groups are raw providedBy URIs unless the
-        # builder has a groups lookup; the dashboard resolves them to labels.
+        # editorial group, pass rate) and the model lists. groups are raw
+        # providedBy URIs unless the builder has a groups lookup; the dashboard
+        # resolves them to labels.
         model_records.append({
             "model": item.id,
             "modelstate": gcg.modelstate,
             "groups": gcg.groups or [],
+            "contributors": model_contributors(gcg),
             "title": gcg.title,
             "total_units": total_units,
             "passing_units": len(current),
+            "total_lines_est": total_lines,
+            "passing_lines_est": _lines(current),
         })
 
     stage_stats = []
@@ -112,8 +163,60 @@ def _run_phase_b(builder, models_manifest, unit_rules, unit_registry, out_dir,
         prefix = f"{idx:02d}-{rule.id}"
         _write_jsonl(reports_dir / f"{prefix}.jsonl", rows[j])
         _write_rejects_tsv(out_dir / f"{prefix}.rejects.tsv", rejects[j], rule.id)
-        stage_stats.append(StageStat("B", idx, rule.id, in_count[j], out_count[j]))
-    return stage_stats, final_units, model_records
+        stage_stats.append(StageStat("B", idx, rule.id, in_count[j], out_count[j],
+                                     lines_in[j], lines_out[j]))
+    return stage_stats, final_units, model_records, ledger_rows
+
+
+def _make_count_hook(builder):
+    """Phase A counting pass: parse a removed model once (same parser as Phase
+    B) so its unit / line / contributor totals reach the reject record and the
+    summary's line columns. A parse failure is recorded, not fatal: the
+    counting pass is reporting, the removal already happened."""
+    def on_reject(item, verdict):
+        try:
+            item.meta.update(count_model(builder, item.path))
+        except Exception as exc:  # noqa: BLE001 -- reporting must not kill the run
+            item.meta["count_error"] = f"{type(exc).__name__}: {exc}"
+    return on_reject
+
+
+def _fill_phase_a_lines(stages, phase_a_results, lines_into_phase_b):
+    """Fill Phase A line columns backwards from the Phase B input total:
+    lines_out(i) = lines_in(i+1); lines_in(i) = lines_out(i) + lines removed
+    at i (0 for a set-aside rule). The counted universe therefore excludes
+    set-aside models. Returns the extra set-aside summary rows (one per
+    set-aside rule that removed at least one model; In = Out = models set
+    aside, line cells empty because those models are never parsed)."""
+    set_aside_rows = []
+    lines_out = lines_into_phase_b
+    for stat, result in reversed(list(zip(stages, phase_a_results))):
+        if stat.rule_id in SET_ASIDE_RULE_IDS:
+            removed_lines = 0
+            n = len(result.rejected)
+            if n:
+                set_aside_rows.append(
+                    StageStat(SET_ASIDE_PHASE, stat.index, stat.rule_id, n, n))
+        else:
+            removed_lines = sum(it.meta.get("gpad_lines_est", 0)
+                                for it, _ in result.rejected)
+        stat.lines_out = lines_out
+        stat.lines_in = lines_out + removed_lines
+        lines_out = stat.lines_in
+    return list(reversed(set_aside_rows))
+
+
+def _set_aside_rows_without_lines(stages, phase_a_results):
+    rows = []
+    for stat, result in zip(stages, phase_a_results):
+        n = len(result.rejected)
+        if stat.rule_id in SET_ASIDE_RULE_IDS and n:
+            rows.append(StageStat(SET_ASIDE_PHASE, stat.index, stat.rule_id, n, n))
+    return rows
+
+
+def _sort_stages(stages):
+    return sorted(stages, key=lambda s: (PHASE_ORDER.get(s.phase, 9), s.index))
 
 
 def run_ratchet(models_dir, rules_dir="rules", out_dir=None, *, go=None, ro=None,
@@ -145,39 +248,55 @@ def run_ratchet(models_dir, rules_dir="rules", out_dir=None, *, go=None, ro=None
 
     stages: List[StageStat] = []
 
+    if builder is None and go is not None:
+        from ..gocam_ttl import GoCamGraphBuilder
+        builder = GoCamGraphBuilder(go, ro, groups)
+    count_hook = _make_count_hook(builder) if builder is not None else None
+
     # --- Phase A: model ratchet ---
     model_rules = load_rules(rules_dir, phase="model")
     model_registry = build_model_rule_registry(skip_prefixes=skip_prefixes,
                                                true_gocam_ids=true_gocam_ids)
+    phase_a_results = []
     for i, rule in enumerate(model_rules):
         adapter = resolve_adapter(rule, model_registry)
+        on_reject = None if rule.id in SET_ASIDE_RULE_IDS else count_hook
         result = run_stage(adapter, manifest, out_dir=phase_a_dir, index=i,
-                           stage_id=rule.id, ctx=None)
+                           stage_id=rule.id, ctx=None, on_reject=on_reject)
         stages.append(StageStat("A", i, rule.id, result.in_count, result.out_count))
+        phase_a_results.append(result)
         manifest = result.survivors
     phase_a_survivors = list(manifest.ids)
     manifest.write(out_dir / "SA-final.models.manifest.jsonl")
 
     # --- Phase B: unit ratchet over surviving models ---
     final_units: List[str] = []
-    if builder is None and go is not None:
-        from ..gocam_ttl import GoCamGraphBuilder
-        builder = GoCamGraphBuilder(go, ro, groups)
-
     if builder is not None:
         phase_b_dir.mkdir(parents=True, exist_ok=True)
         unit_rules = load_rules(rules_dir, phase="unit")
         unit_registry = build_unit_rule_registry()
-        b_stats, final_units, model_records = _run_phase_b(
+        b_stats, final_unit_items, model_records, ledger_rows = _run_phase_b(
             builder, manifest, unit_rules, unit_registry, phase_b_dir,
             base_index=len(model_rules))
+        final_units = [u.id for u in final_unit_items]
+        stages.extend(_fill_phase_a_lines(
+            stages[:len(model_rules)], phase_a_results,
+            b_stats[0].lines_in if b_stats else sum(
+                r["total_lines_est"] for r in model_records)))
         stages.extend(b_stats)
-        Manifest([Item(id=uid) for uid in final_units]).write(
-            out_dir / "SB-final.units.manifest.jsonl")
+        # Survivors keep their meta (model, index, edges, lines, contributors):
+        # this manifest is what the regenerate step and the roll-ups read.
+        Manifest(final_unit_items).write(out_dir / "SB-final.units.manifest.jsonl")
         with open(out_dir / "model_stats.jsonl", "w") as fh:
             for rec in model_records:
                 fh.write(json.dumps(rec) + "\n")
+        write_ledger(ledger_rows, out_dir / "ledger.tsv")
+        write_rollups(out_dir, [r.id for r in unit_rules])
+        write_model_lists(out_dir)
+    else:
+        stages.extend(_set_aside_rows_without_lines(stages, phase_a_results))
 
+    stages = _sort_stages(stages)
     write_summary(stages, out_dir / "summary.tsv")
     return RatchetResult(stages, phase_a_survivors, final_units, out_dir)
 
@@ -204,17 +323,17 @@ def _partition(items, n):
 
 
 def _save_stage_stats(shard_dir, stages):
-    import json
     data = [{"phase": s.phase, "index": s.index, "rule_id": s.rule_id,
-             "in_count": s.in_count, "out_count": s.out_count} for s in stages]
+             "in_count": s.in_count, "out_count": s.out_count,
+             "lines_in": s.lines_in, "lines_out": s.lines_out} for s in stages]
     (shard_dir / "stages.json").write_text(json.dumps(data))
 
 
 def _load_stage_stats(shard_dir):
-    import json
     data = json.loads((shard_dir / "stages.json").read_text())
     return [StageStat(d["phase"], d["index"], d["rule_id"],
-                      d["in_count"], d["out_count"]) for d in data]
+                      d["in_count"], d["out_count"],
+                      d.get("lines_in"), d.get("lines_out")) for d in data]
 
 
 def _run_shard(task):
@@ -235,19 +354,29 @@ def _run_shard(task):
     return result.stages
 
 
+def _add_opt(a, b):
+    """Sum of two optional line counts; None if either is not estimated."""
+    return None if a is None or b is None else a + b
+
+
 def _aggregate_stage_stats(shard_stage_lists):
-    """Sum per-stage in/out counts across shards (shards share the rule set)."""
+    """Sum per-stage in/out counts (units and lines) across shards (shards
+    share the rule set; a line total is None if any shard lacks it)."""
     agg = {}
     order = []
     for stages in shard_stage_lists:
         for s in stages:
             key = (s.phase, s.index, s.rule_id)
             if key not in agg:
-                agg[key] = StageStat(s.phase, s.index, s.rule_id, 0, 0)
+                agg[key] = StageStat(s.phase, s.index, s.rule_id, 0, 0,
+                                     s.lines_in, s.lines_out)
                 order.append(key)
+            else:
+                agg[key].lines_in = _add_opt(agg[key].lines_in, s.lines_in)
+                agg[key].lines_out = _add_opt(agg[key].lines_out, s.lines_out)
             agg[key].in_count += s.in_count
             agg[key].out_count += s.out_count
-    return [agg[k] for k in sorted(order, key=lambda key: (key[0], key[1]))]
+    return _sort_stages([agg[k] for k in order])
 
 
 def _merge_named(shard_dirs, rel_glob, dest_dir, skip_header):
@@ -287,6 +416,19 @@ def _concat_shard_outputs(out_dir, shard_dirs):
     # ... and the per-stage JSONL reports.
     _merge_named(shard_dirs, "phase-a/reports/*.jsonl", out_dir / "reports", False)
     _merge_named(shard_dirs, "phase-b/reports/*.jsonl", out_dir / "reports", False)
+    # The ledger concatenates (one row per removed unit, no cross-shard state).
+    _merge_named(shard_dirs, "ledger.tsv", out_dir, True)
+
+
+def _write_merged_rollups(out_dir, stages):
+    """Roll-ups and model lists are recomputed from the MERGED files, never by
+    summing per-shard roll-ups (a contributor spanning shards would otherwise
+    get one row per shard)."""
+    if not (out_dir / "ledger.tsv").exists():
+        return
+    unit_rule_ids = [s.rule_id for s in stages if s.phase == "B"]
+    write_rollups(out_dir, unit_rule_ids)
+    write_model_lists(out_dir)
 
 
 def run_ratchet_sharded(models_dir, rules_dir="rules", out_dir=None, *, jobs=4,
@@ -326,6 +468,7 @@ def run_ratchet_sharded(models_dir, rules_dir="rules", out_dir=None, *, jobs=4,
     merged_stages = _aggregate_stage_stats(shard_stage_lists)
     shard_dirs = [out_dir / "shards" / f"shard-{t[0]:03d}" for t in tasks]
     _concat_shard_outputs(out_dir, shard_dirs)
+    _write_merged_rollups(out_dir, merged_stages)
     write_summary(merged_stages, out_dir / "summary.tsv")
     return ShardedResult(merged_stages, out_dir, n_shards=len(tasks))
 

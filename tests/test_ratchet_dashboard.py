@@ -32,7 +32,10 @@ def test_build_data_shapes(tmp_path):
     data = build_data(out, "rules")
     assert data["headline"] == {
         "s0_models": 100, "candidate_models": 90,
-        "annotation_units": 200, "standard_annotations": 195}
+        "annotation_units": 200, "standard_annotations": 195,
+        # a 6-column summary has no line estimates and nothing set aside
+        "lines_in": None, "unit_lines": None, "standard_lines": None,
+        "set_aside_models": 0}
     assert [s["rule_id"] for s in data["stages"]] == ["skip_prefix", "edge_without_evidence"]
     sp = next(s for s in data["stages"] if s["rule_id"] == "skip_prefix")
     labels = {p["label"]: p["count"] for p in sp["patterns"]}
