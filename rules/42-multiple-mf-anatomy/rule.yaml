@@ -1,0 +1,11 @@
+id: multiple_mf_anatomy
+phase: unit
+stage: 4
+tsv: 12
+kind: python
+entrypoint: unit_multiple_mf_anatomy
+inputs: [go, anatomy]
+description: >-
+  An annotation may contain at most one MF->anatomical-structure edge (GO CC
+  or anatomy-ontology term).
+enabled: true

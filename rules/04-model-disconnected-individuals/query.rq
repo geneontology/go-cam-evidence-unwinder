@@ -1,0 +1,17 @@
+PREFIX owl: <http://www.w3.org/2002/07/owl#>
+
+# One row per disconnected owl:NamedIndividual: an individual with no incoming
+# AND no outgoing connection to another named individual, counting both direct
+# triples and reified owl:Axiom edges. Adapted from noctua-models
+# sparql/check-disconnected-individuals.rq. remove_when: select_nonempty.
+SELECT DISTINCT ?individual WHERE {
+  ?individual a owl:NamedIndividual .
+  # no outgoing direct edge to another named individual
+  MINUS { ?individual ?p1 ?o1 . ?o1 a owl:NamedIndividual . }
+  # no incoming direct edge from another named individual
+  MINUS { ?s2 ?p2 ?individual . ?s2 a owl:NamedIndividual . }
+  # not the source of a reified edge
+  MINUS { ?ax3 owl:annotatedSource ?individual . }
+  # not the target of a reified edge
+  MINUS { ?ax4 owl:annotatedTarget ?individual . }
+}

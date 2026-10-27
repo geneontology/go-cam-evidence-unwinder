@@ -1,0 +1,11 @@
+id: model_has_activity_edges
+phase: model
+stage: 0
+kind: sparql
+remove_when: ask_false
+inputs: []
+description: >-
+  Drop degenerate models that contain no GO-CAM activity edge at all (no
+  OBO-namespace reified owl:Axiom). Such a model yields zero annotation units, so
+  it cannot contribute a standard annotation. SPARQL ASK; no ontology needed.
+enabled: true

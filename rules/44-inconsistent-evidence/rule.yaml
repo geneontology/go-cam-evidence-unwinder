@@ -1,0 +1,11 @@
+id: inconsistent_evidence
+phase: unit
+stage: 4
+tsv: null
+kind: python
+entrypoint: unit_inconsistent_evidence
+inputs: []
+description: >-
+  In a multi-edge annotation, every evidence-metadata group must contain
+  exactly one evidence from each edge (so it splits cleanly).
+enabled: true

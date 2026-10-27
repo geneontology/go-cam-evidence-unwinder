@@ -1,0 +1,11 @@
+id: edge_without_evidence
+phase: unit
+stage: 1
+tsv: 15
+kind: python
+entrypoint: unit_edge_without_evidence
+inputs: []
+description: >-
+  Every GO-CAM relation edge in the annotation must carry a lego:evidence
+  triple.
+enabled: true

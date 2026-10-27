@@ -1,0 +1,13 @@
+id: not_true_gocam
+phase: model
+stage: 0
+kind: python
+entrypoint: not_true_gocam_gate
+inputs: [true_gocam_set]
+description: >-
+  R1: a true GO-CAM -- a production, pathway-like model (a path of >=3 activities
+  connected by causal / shared-chemical edges) -- cannot be a standard annotation
+  by definition. Removes models whose id is in the consumed true-GO-CAM set
+  (pipeline-from-goa go-cams/json product). Membership test on the model id; no
+  graph parse. A no-op when no set is supplied.
+enabled: true

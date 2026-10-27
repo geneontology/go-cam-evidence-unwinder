@@ -1,0 +1,11 @@
+id: enabler_not_gp
+phase: unit
+stage: 1
+tsv: 13
+kind: python
+entrypoint: unit_enabler_not_gp
+inputs: [gp_allowlist]
+description: >-
+  The enabler (target of an enabled_by edge) must be a gene product, not a GO
+  term / ChEBI / other entity.
+enabled: true

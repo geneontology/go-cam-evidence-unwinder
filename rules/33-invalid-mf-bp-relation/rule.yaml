@@ -1,0 +1,12 @@
+id: invalid_mf_bp_relation
+phase: unit
+stage: 3
+tsv: 5
+kind: python
+entrypoint: unit_invalid_mf_bp_relation
+inputs: [go, ro]
+description: >-
+  A root molecular function connected to a non-root biological process must
+  use part_of, the acts_upstream (RO:0002264) family, or the causal
+  (RO:0002418) family. Skipped without RO.
+enabled: true

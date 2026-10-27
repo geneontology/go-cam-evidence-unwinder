@@ -1,0 +1,11 @@
+id: multiple_mf_bp
+phase: unit
+stage: 4
+tsv: 11
+kind: python
+entrypoint: unit_multiple_mf_bp
+inputs: [go, ro]
+description: >-
+  An annotation may contain at most one MF->BP edge (over part_of /
+  acts_upstream / causal relations).
+enabled: true

@@ -1,0 +1,11 @@
+id: invalid_bp_cc_relation
+phase: unit
+stage: 2
+tsv: 10
+kind: python
+entrypoint: unit_invalid_bp_cc_relation
+inputs: [go, anatomy]
+description: >-
+  A biological process connected to a cellular component or anatomy term must
+  use occurs_in (BFO:0000066).
+enabled: true

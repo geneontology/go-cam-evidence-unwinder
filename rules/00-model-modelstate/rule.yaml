@@ -1,0 +1,10 @@
+id: modelstate_delete
+phase: model
+stage: 0
+kind: python
+entrypoint: modelstate_gate
+inputs: []
+description: >-
+  Drop whole models whose lego:modelstate is "delete"; such models are never
+  classified. Cheapest possible Phase A gate (a single model-level triple).
+enabled: true

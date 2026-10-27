@@ -1,0 +1,13 @@
+id: no_gp_at_all
+phase: unit
+stage: 1
+tsv: null
+kind: python
+entrypoint: unit_no_gp_at_all
+inputs: []
+description: >-
+  The annotation subgraph must contain at least one gene product. A standard
+  annotation links a GP to GO; a subgraph with no GP at all (e.g. a bare
+  anatomy/chemical placement) is non-standard. Annotation-level failure: every
+  edge is recorded.
+enabled: true
