@@ -90,3 +90,16 @@ def test_sharded_full_parity_with_units(tmp_path, builder):
     assert len(final) == expected
     assert (out / "summary.tsv").exists()
     assert (out / "rejects").exists()
+
+    # Axes outputs merge too: the ledger concatenates (one header), the
+    # roll-ups and model lists are recomputed from the merged files.
+    ledger = _lines(out / "ledger.tsv")
+    assert ledger[0].startswith("model_id\tunit_index")
+    assert sum(1 for l in ledger if l.startswith("model_id\t")) == 1
+    summary = [l.split("\t") for l in _lines(out / "summary.tsv")[1:]]
+    removed_b = sum(int(r[4]) for r in summary if r[0] == "B")
+    assert len(ledger) - 1 == removed_b
+    assert any(r[0] == "B" and r[6] != "" for r in summary)       # line columns filled
+    for name in ("ledger.by-group.tsv", "ledger.by-contributor.tsv",
+                 "models.partial.tsv", "models.all-standard.tsv"):
+        assert (out / name).exists(), name
