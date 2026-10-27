@@ -117,6 +117,17 @@ Open `target_YYYYMMDD/dashboard.html` in a browser — it's a single self-contai
 file, so you can copy it off the remote host and share it as-is. For a quick,
 corpus-free sanity check, `make ratchet-smoke`.
 
+A run's output directory also holds the loss accounting the freeze-and-regenerate
+workflow consumes (details and column definitions in the design doc's
+"2026-10-26 axes" section): `summary.tsv` (per stage, in units AND estimated
+GPAD lines), `ledger.tsv` (one row per removed annotation unit: model, rule,
+the complete set of failing checks, groups, contributors, edges, estimated
+lines), `ledger.by-group.tsv` / `ledger.by-contributor.tsv` roll-ups,
+`models.partial.tsv` (models to freeze and regenerate) and
+`models.all-standard.tsv`. GPAD line counts are estimates (one per
+(edge, evidence) pair); check them against a real per-model GPAD export with
+`make ratchet-validate-lines GPAD_DIR=/path/to/<model_id>.gpad/files`.
+
 Notes for remote / restricted hosts:
 
 - **Sizing `JOBS`:** each shard worker loads its own ~0.7 GB GO copy, so pick
