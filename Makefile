@@ -238,6 +238,18 @@ ratchet-dashboard: $(GROUPS_YAML)
 		--groups-yaml $(GROUPS_YAML) \
 		--output $(dir $(RATCHET_OUT))dashboard.html
 
+# Compare a run's estimated GPAD line counts (model_stats.jsonl) with a real
+# per-model GPAD export: a directory of <model_id>.gpad files, which lives on
+# the host that ran minerva's --lego-to-gpad-sparql, not here.
+#   make ratchet-validate-lines GPAD_DIR=/path/to/gpad [RATCHET_OUT=target_YYYYMMDD/ratchet]
+.PHONY: ratchet-validate-lines
+ratchet-validate-lines:
+	@test -n "$(GPAD_DIR)" || { echo "GPAD_DIR=<dir of <model_id>.gpad files> is required"; exit 2; }
+	python3 scripts/validate_gpad_lines.py \
+		--model-stats $(RATCHET_OUT)/model_stats.jsonl \
+		--gpad-dir $(GPAD_DIR) \
+		--no-per-model
+
 # Quick smoke run over the bundled test fixtures (no corpus download needed).
 ratchet-smoke: target/go_20250601.json
 	mkdir -p $(TARGET_DIR)/ratchet-smoke

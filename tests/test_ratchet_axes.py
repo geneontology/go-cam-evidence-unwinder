@@ -10,6 +10,7 @@ Fixture facts (verified with an independent rdflib pass over the TTLs):
   SYNGO_5371 / R-HSA-9937080  12 / 30 estimated lines (Phase A counting pass).
 """
 
+import importlib.util
 import json
 import re
 import shutil
@@ -439,3 +440,58 @@ def test_dashboard_html_contains_new_tables(tmp_path):
     assert "<script src=" not in html and 'rel="stylesheet"' not in html   # still self-contained
     data = json.loads(re.search(r"const DATA = (\{.*?\});\nlet SEL", html, re.S).group(1))
     assert data["rollups"]["by_contributor"]["rows"][0][2] == 1
+
+
+# ----------------------------------------------------------------------
+# validator script
+# ----------------------------------------------------------------------
+
+def _load_validator():
+    spec = importlib.util.spec_from_file_location("validate_gpad_lines", VALIDATOR)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def _gpad_fixture(tmp_path):
+    gpad = tmp_path / "gpad"
+    gpad.mkdir()
+    (gpad / "m1.gpad").write_text("!gpa-version: 2.0\n!generated\nMGI:1\tGO:1\n\nMGI:1\tGO:2\nMGI:1\tGO:3\n")  # 3
+    (gpad / "m2.gpad").write_text("!gpa-version: 2.0\nSGD:1\tGO:1\n")                                        # 1
+    (gpad / "m3.gpad").write_text("!gpa-version: 2.0\n" + "".join(f"X:{i}\tGO:{i}\n" for i in range(10)))  # 10
+    stats = tmp_path / "model_stats.jsonl"
+    stats.write_text("".join(json.dumps(r) + "\n" for r in [
+        {"model": "m1", "total_lines_est": 3},    # exact
+        {"model": "m2", "total_lines_est": 2},    # +1
+        {"model": "m3", "total_lines_est": 6},    # -4 (worst)
+        {"model": "m4", "total_lines_est": 9},    # no gpad file -> missing
+    ]))
+    return stats, gpad
+
+
+def test_validator_computes_aggregates(tmp_path):
+    mod = _load_validator()
+    stats, gpad = _gpad_fixture(tmp_path)
+    assert mod.count_gpad_lines(gpad / "m1.gpad") == 3
+    res = mod.compare(stats, gpad, worst=2)
+    assert res["n"] == 3 and res["missing"] == ["m4"]
+    assert res["sum_est"] == 11 and res["sum_actual"] == 14
+    assert abs(res["ratio"] - 11 / 14) < 1e-9
+    assert res["exact"] == 1
+    assert res["median_abs_err"] == 1
+    assert [r["model_id"] for r in res["worst"]] == ["m3", "m2"]
+    assert res["worst"][0]["diff"] == -4
+    rows = {r["model_id"]: (r["est"], r["actual"], r["diff"]) for r in res["rows"]}
+    assert rows == {"m1": (3, 3, 0), "m2": (2, 1, 1), "m3": (6, 10, -4)}
+
+
+def test_validator_main_prints_report(tmp_path, capsys):
+    mod = _load_validator()
+    stats, gpad = _gpad_fixture(tmp_path)
+    assert mod.main(["--model-stats", str(stats), "--gpad-dir", str(gpad), "--worst", "1"]) == 0
+    out = capsys.readouterr().out
+    assert out.splitlines()[0] == "model_id\test\tactual\tdiff"
+    assert "m2\t2\t1\t+1" in out
+    assert "# sum est\t11" in out and "# sum actual\t14" in out
+    assert "# exact matches\t1" in out and "# models missing a .gpad\t1" in out
+    assert "# m3\t6\t10\t-4" in out and "m2\t2\t1\t+1\n#" not in out.split("# worst")[1]
