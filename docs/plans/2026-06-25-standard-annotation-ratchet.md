@@ -98,6 +98,7 @@ reproduced in `docs/plans/2026-06-05-remaining-std-annot-criteria-design.md`.
 |---|---|---|---|---|---|
 | A · gate | — | `modelstate==delete` skip | model-gate | model graph | trivial |
 | A · gate | — | `skip_prefix` (SYNGO, R-HSA) | model-gate | filename | n/a |
+| A · gate | — | `group_allowlist` (`--group`, 2026-10-27) | model-gate | model graph (providedBy, get_groups fallback) | trivial |
 | A · gate (**R1**) | — | `not_true_gocam` | model-gate | published true-GO-CAM ID set | n/a (membership) |
 | B · 1 cheap | 15 | `edge_without_evidence` | evidence | none | ✅ trivial |
 | B · 1 cheap | 13 | `enabler_not_gp` | relation | GP allowlist | ⚠️ moderate |

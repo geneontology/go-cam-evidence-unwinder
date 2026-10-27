@@ -56,6 +56,62 @@ def modelstate_gate(ctx, item, drop_states=("delete",)) -> Verdict:
     return Verdict.survive()
 
 
+PAV_PROVIDED_BY = rdflib.URIRef("http://purl.org/pav/providedBy")
+
+
+def _model_groups(graph: rdflib.Graph) -> set:
+    """providedBy values of the model-level owl:Ontology subject(s); if none,
+    every providedBy in the graph (same fallback as GoCamGraph.get_groups)."""
+    groups = set()
+    for model in graph.subjects(rdflib.RDF.type, rdflib.OWL.Ontology):
+        groups.update(str(g) for g in graph.objects(model, PAV_PROVIDED_BY))
+    if not groups:
+        groups = {str(g) for g in graph.objects(None, PAV_PROVIDED_BY)}
+    return groups
+
+
+def resolve_group_allowlist(values, groups_yaml=None) -> set:
+    """Turn ``--group`` values (group ids like ``http://zfin.org`` or labels like
+    ``ZFIN``) into a set of group ids. Labels need ``groups_yaml``; an
+    unresolvable label raises so a typo cannot silently empty the universe."""
+    values = [v for v in (values or ()) if v]
+    if not values:
+        return set()
+    by_label = {}
+    if groups_yaml:
+        from ..gocam_ttl import load_groups_lookup
+        for uri, label in load_groups_lookup(groups_yaml).items():
+            by_label[str(label).lower()] = uri
+    ids = set()
+    for v in values:
+        if v.startswith("http://") or v.startswith("https://"):
+            ids.add(v)
+        elif v.lower() in by_label:
+            ids.add(by_label[v.lower()])
+        else:
+            raise ValueError(f"--group {v!r}: not a group id and not a label in groups.yaml")
+    return ids
+
+
+def make_group_allowlist_gate(group_ids):
+    """Build a gate that keeps models whose groups intersect ``group_ids``.
+    No-op (everything survives) when the allowlist is empty."""
+    group_ids = set(group_ids or ())
+
+    def group_allowlist_gate(ctx, item) -> Verdict:
+        if not group_ids:
+            return Verdict.survive()
+        graph = rdflib.Graph()
+        graph.parse(str(item.path), format="ttl")
+        groups = _model_groups(graph)
+        if groups & group_ids:
+            return Verdict.survive()
+        return Verdict.reject("group_not_in_allowlist",
+                              groups="|".join(sorted(groups)) or "(none)")
+
+    return group_allowlist_gate
+
+
 def make_skip_prefix_gate(prefixes):
     """Build a gate that drops models whose filename starts with any prefix."""
     prefixes = tuple(prefixes or ())
@@ -148,7 +204,8 @@ def load_true_gocam_ids(source) -> set:
     return ids
 
 
-def build_model_rule_registry(skip_prefixes=None, true_gocam_ids=None) -> dict:
+def build_model_rule_registry(skip_prefixes=None, true_gocam_ids=None,
+                              group_allowlist=None) -> dict:
     """Map Phase A rule entrypoint names to runnable callables.
 
     Used by the CLI to resolve ``kind: python`` model rules. The parameterized
@@ -158,5 +215,6 @@ def build_model_rule_registry(skip_prefixes=None, true_gocam_ids=None) -> dict:
     return {
         "modelstate_gate": modelstate_gate,
         "skip_prefix_gate": make_skip_prefix_gate(skip_prefixes),
+        "group_allowlist_gate": make_group_allowlist_gate(group_allowlist),
         "not_true_gocam_gate": make_not_true_gocam_gate(true_gocam_ids),
     }

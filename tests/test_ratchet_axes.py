@@ -300,7 +300,7 @@ def test_phase_a_reject_records_carry_counts_except_set_aside(run):
     assert by_id["R-HSA-9937080"]["gpad_lines_est"] == "0"
     assert by_id["SYNGO_5371"]["gpad_lines_est"] == "6"
     assert by_id["SYNGO_5371"]["contributors"].count("|") == 2        # 3 ORCIDs
-    _, aside = _tsv(out / "phase-a" / "02-not_true_gocam.rejects.tsv")
+    _, aside = _tsv(out / "phase-a" / "03-not_true_gocam.rejects.tsv")
     assert aside[0]["id"] == "5b318d0900000481"
     assert aside[0]["gpad_lines_est"] == "" and aside[0]["contributors"] == ""
     # the JSONL report rows carry the same axis fields
@@ -323,7 +323,7 @@ def test_unit_reject_record_carries_complete_failure_set(run):
             assert r["gpad_lines_est"] != ""
             seen += 1
     assert seen > 0
-    report = _jsonl(out / "phase-b" / "reports" / "04-edge_without_evidence.jsonl")
+    report = _jsonl(out / "phase-b" / "reports" / "05-edge_without_evidence.jsonl")
     rec = next(r for r in report if r["id"].endswith("57c82fad00000252#0"))
     assert rec["decision"] == "remove"
     assert rec["all_failed_checks"] == ["edge_without_evidence", "inconsistent_evidence",

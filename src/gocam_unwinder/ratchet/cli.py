@@ -29,7 +29,8 @@ from typing import List, Optional
 
 from .core import Item, Manifest
 from .engine import resolve_adapter
-from .model_rules import build_model_rule_registry, load_true_gocam_ids
+from .model_rules import (build_model_rule_registry, load_true_gocam_ids,
+                          resolve_group_allowlist)
 from .rules import load_rules
 from .runner import _write_jsonl, _write_rejects_tsv, report_row, run_stage
 from .summary import write_ledger, write_model_lists, write_rollups, write_summary
@@ -235,7 +236,7 @@ def _sort_stages(stages):
 def run_ratchet(models_dir, rules_dir="rules", out_dir=None, *, go=None, ro=None,
                 groups=None, skip_prefixes=None, true_gocam_ids=None,
                 true_gocam_source=None, limit=None, builder=None,
-                model_paths=None) -> RatchetResult:
+                model_paths=None, group_allowlist=None) -> RatchetResult:
     """Run the full two-level ratchet over ``models_dir`` (or an explicit
     ``model_paths`` list, used by the sharded runner).
 
@@ -269,7 +270,8 @@ def run_ratchet(models_dir, rules_dir="rules", out_dir=None, *, go=None, ro=None
     # --- Phase A: model ratchet ---
     model_rules = load_rules(rules_dir, phase="model")
     model_registry = build_model_rule_registry(skip_prefixes=skip_prefixes,
-                                               true_gocam_ids=true_gocam_ids)
+                                               true_gocam_ids=true_gocam_ids,
+                                               group_allowlist=group_allowlist)
     phase_a_results = []
     for i, rule in enumerate(model_rules):
         adapter = resolve_adapter(rule, model_registry)
@@ -353,7 +355,7 @@ def _run_shard(task):
     """Worker entry point (top-level so it is picklable for multiprocessing).
     Runs the ratchet over one shard's models, with shard-level resume."""
     (k, model_path_strs, rules_dir, out_root, go, ro, groups,
-     skip_prefixes, true_gocam_ids) = task
+     skip_prefixes, true_gocam_ids, group_allowlist) = task
     shard_dir = Path(out_root) / "shards" / f"shard-{k:03d}"
     if (shard_dir / ".done").exists():
         return _load_stage_stats(shard_dir)  # resume: already complete
@@ -361,7 +363,7 @@ def _run_shard(task):
     result = run_ratchet(
         None, rules_dir=rules_dir, out_dir=shard_dir, go=go, ro=ro, groups=groups,
         skip_prefixes=skip_prefixes, true_gocam_ids=set(true_gocam_ids),
-        model_paths=model_path_strs)
+        model_paths=model_path_strs, group_allowlist=set(group_allowlist or ()))
     _save_stage_stats(shard_dir, result.stages)
     (shard_dir / ".done").write_text("ok\n")
     return result.stages
@@ -447,7 +449,7 @@ def _write_merged_rollups(out_dir, stages):
 def run_ratchet_sharded(models_dir, rules_dir="rules", out_dir=None, *, jobs=4,
                         go=None, ro=None, groups=None, skip_prefixes=None,
                         true_gocam_ids=None, true_gocam_source=None,
-                        limit=None) -> ShardedResult:
+                        limit=None, group_allowlist=None) -> ShardedResult:
     """Run the ratchet across ``jobs`` parallel shards, then merge.
 
     Identical result to a single-process run (a model never spans shards).
@@ -467,7 +469,8 @@ def run_ratchet_sharded(models_dir, rules_dir="rules", out_dir=None, *, jobs=4,
     shards = _partition([str(p) for p in ttls], jobs)
     tasks = [
         (k, shards[k], rules_dir, str(out_dir), go, ro, groups,
-         list(skip_prefixes or []), list(true_gocam_ids))
+         list(skip_prefixes or []), list(true_gocam_ids),
+         sorted(group_allowlist or ()))
         for k in range(jobs) if shards[k]
     ]
 
@@ -501,6 +504,11 @@ def main(argv=None):
     ap.add_argument("--skip-prefix", action="append", dest="skip_prefixes",
                     default=[], metavar="PREFIX",
                     help="Filename prefix to skip in Phase A (repeatable).")
+    ap.add_argument("--group", action="append", dest="group_allowlist",
+                    default=[], metavar="LABEL_OR_ID",
+                    help="Keep only models of this editorial group (repeatable; "
+                         "a groups.yaml label needs --groups, an id works alone). "
+                         "Phase A gate group_allowlist; no-op when absent.")
     ap.add_argument("--true-gocam-source", metavar="DIR_OR_FILE",
                     help="Dir of true-GO-CAM JSONs (stems) or an id file (R1).")
     ap.add_argument("--limit", type=int, default=None,
@@ -510,17 +518,20 @@ def main(argv=None):
                          "its own GO ontology copy, so bound by RAM. Resumable.")
     args = ap.parse_args(argv)
 
+    group_allowlist = resolve_group_allowlist(args.group_allowlist, args.groups)
     if args.jobs and args.jobs > 1:
         result = run_ratchet_sharded(
             args.models_dir, args.rules_dir, args.out_dir, jobs=args.jobs,
             go=args.go, ro=args.ro, groups=args.groups,
             skip_prefixes=args.skip_prefixes,
-            true_gocam_source=args.true_gocam_source, limit=args.limit)
+            true_gocam_source=args.true_gocam_source, limit=args.limit,
+            group_allowlist=group_allowlist)
     else:
         result = run_ratchet(
             args.models_dir, args.rules_dir, args.out_dir, go=args.go, ro=args.ro,
             groups=args.groups, skip_prefixes=args.skip_prefixes,
-            true_gocam_source=args.true_gocam_source, limit=args.limit)
+            true_gocam_source=args.true_gocam_source, limit=args.limit,
+            group_allowlist=group_allowlist)
     print((Path(args.out_dir) / "summary.tsv").read_text())
     return result
 

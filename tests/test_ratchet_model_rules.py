@@ -5,6 +5,8 @@ from pathlib import Path
 from gocam_unwinder.ratchet.core import Item, Manifest
 from gocam_unwinder.ratchet.engine import resolve_adapter
 from gocam_unwinder.ratchet.model_rules import (
+    make_group_allowlist_gate,
+    resolve_group_allowlist,
     build_model_rule_registry,
     load_true_gocam_ids,
     make_not_true_gocam_gate,
@@ -129,7 +131,7 @@ def test_load_true_gocam_ids_from_jsonl_file(tmp_path):
 
 def test_build_registry_resolves_entrypoints():
     reg = build_model_rule_registry(skip_prefixes=["SYNGO"], true_gocam_ids={"X"})
-    assert set(reg) == {"modelstate_gate", "skip_prefix_gate", "not_true_gocam_gate"}
+    assert set(reg) == {"modelstate_gate", "skip_prefix_gate", "group_allowlist_gate", "not_true_gocam_gate"}
     assert reg["skip_prefix_gate"](None, Item(id="SYNGO_1")).keep is False
     assert reg["not_true_gocam_gate"](None, Item(id="X")).keep is False
 
@@ -142,7 +144,7 @@ def test_phase_a_pipeline_through_runner(tmp_path):
                                           true_gocam_ids=set())
     model_rules = load_rules("rules", phase="model")
     assert [r.id for r in model_rules] == [
-        "modelstate_delete", "skip_prefix", "not_true_gocam", "model_has_activity_edges"]
+        "modelstate_delete", "skip_prefix", "group_allowlist", "not_true_gocam", "model_has_activity_edges"]
 
     items = [Item(id=p.stem, path=p) for p in (
         RES / "SYNGO_5371.ttl",
@@ -160,3 +162,49 @@ def test_phase_a_pipeline_through_runner(tmp_path):
         manifest = result.survivors
 
     assert manifest.ids == ["MGI_MGI_1100089"]
+
+
+_GROUP_TTL = """@prefix owl: <http://www.w3.org/2002/07/owl#> .
+@prefix pav: <http://purl.org/pav/> .
+<http://model.geneontology.org/g1> a owl:Ontology ; pav:providedBy "http://zfin.org" .
+"""
+_GROUP_FALLBACK_TTL = """@prefix owl: <http://www.w3.org/2002/07/owl#> .
+@prefix pav: <http://purl.org/pav/> .
+<http://model.geneontology.org/g2> a owl:Ontology .
+<http://model.geneontology.org/g2/ev1> pav:providedBy "http://www.wormbase.org" .
+"""
+
+
+def test_group_allowlist_keeps_matching_and_rejects_others(tmp_path):
+    p = tmp_path / "g1.ttl"
+    p.write_text(_GROUP_TTL)
+    keep = make_group_allowlist_gate({"http://zfin.org", "http://informatics.jax.org"})
+    assert keep(None, Item(id="g1", path=p)).keep is True
+    drop = make_group_allowlist_gate({"http://informatics.jax.org"})
+    v = drop(None, Item(id="g1", path=p))
+    assert v.keep is False and v.reason == "group_not_in_allowlist"
+    assert v.detail["groups"] == "http://zfin.org"
+
+
+def test_group_allowlist_falls_back_to_any_provided_by(tmp_path):
+    p = tmp_path / "g2.ttl"
+    p.write_text(_GROUP_FALLBACK_TTL)
+    assert make_group_allowlist_gate({"http://www.wormbase.org"})(None, Item(id="g2", path=p)).keep is True
+    assert make_group_allowlist_gate({"http://zfin.org"})(None, Item(id="g2", path=p)).keep is False
+
+
+def test_group_allowlist_empty_is_noop(tmp_path):
+    p = tmp_path / "g1.ttl"
+    p.write_text(_GROUP_TTL)
+    assert make_group_allowlist_gate(set())(None, Item(id="g1", path=p)).keep is True
+
+
+def test_resolve_group_allowlist_labels_and_ids(tmp_path):
+    gy = tmp_path / "groups.yaml"
+    gy.write_text("-\n  label: 'ZFIN'\n  id: http://zfin.org\n-\n  label: 'MGI'\n  id: http://informatics.jax.org\n")
+    assert resolve_group_allowlist(["zfin", "http://www.yeastgenome.org"], str(gy)) == {
+        "http://zfin.org", "http://www.yeastgenome.org"}
+    assert resolve_group_allowlist([], None) == set()
+    import pytest
+    with pytest.raises(ValueError):
+        resolve_group_allowlist(["Nope"], str(gy))

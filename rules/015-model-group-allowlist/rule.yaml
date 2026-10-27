@@ -1,0 +1,14 @@
+id: group_allowlist
+phase: model
+stage: 0
+kind: python
+entrypoint: group_allowlist_gate
+inputs: [group_allowlist]
+description: >-
+  Keep only models whose editorial group (pav:providedBy on the model-level
+  owl:Ontology; falling back to any providedBy in the graph when the model-level
+  triple is absent, as gocam_ttl's get_groups does) intersects the configured
+  allowlist (--group, label or id; resolved against groups.yaml). A model with
+  several groups survives if any one matches. Parses the graph. A no-op when no
+  allowlist is configured.
+enabled: true

@@ -70,7 +70,7 @@ def test_seed_rules_dir_loads():
     unit_ids = [r.id for r in unit_rules]
 
     # Phase A gates in dir order; the disabled disconnected example is excluded.
-    assert model_ids[:3] == ["modelstate_delete", "skip_prefix", "not_true_gocam"]
+    assert model_ids[:3] == ["modelstate_delete", "skip_prefix", "group_allowlist"]
     assert "model_has_activity_edges" in model_ids
     assert "model_disconnected_individuals" not in model_ids  # enabled: false
     assert "model_disconnected_individuals" in [
