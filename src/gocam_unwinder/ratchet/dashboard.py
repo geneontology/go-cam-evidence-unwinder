@@ -161,24 +161,25 @@ def _aggregate_rejects(reject_file, top=30, examples_per=5):
 
 def _read_rollup(path, label_lookup=None):
     """ledger.by-*.tsv -> {"rules": [...], "rows": [[name, total, lost,
-    lost_lines, [per-rule lost]], ...]} or None when the file is absent."""
+    lost_lines, fixable, [per-rule lost]], ...]} or None when the file is absent.
+    Column layout follows summary.ROLLUP_BASE_COLUMNS (label, 4 fixed, rules)."""
     path = Path(path)
     if not path.exists():
         return None
     with open(path) as fh:
         header = fh.readline().rstrip("\n").split("\t")
-        rules = header[4:]
+        rules = header[5:]
         rows = []
         for line in fh:
             parts = line.rstrip("\n").split("\t")
-            if len(parts) < 4:
+            if len(parts) < 5:
                 continue
             parts += ["0"] * (len(header) - len(parts))
             name = parts[0]
             if label_lookup:
                 name = label_lookup.get(name, _short_group(name) if "://" in name else name)
             rows.append([name, int(parts[1] or 0), int(parts[2] or 0), int(parts[3] or 0),
-                         [int(x or 0) for x in parts[4:4 + len(rules)]]])
+                         int(parts[4] or 0), [int(x or 0) for x in parts[5:5 + len(rules)]]])
     return {"rules": rules, "rows": rows}
 
 
@@ -691,7 +692,7 @@ function renderRollup(kind){
   rows=rows.slice().sort((a,b)=>{
     let v; if(st.key==='name')v=a[0].localeCompare(b[0]);
     else if(st.key==='total')v=a[1]-b[1]; else if(st.key==='lost')v=a[2]-b[2];
-    else if(st.key==='lines')v=a[3]-b[3]; else v=(a[1]?a[2]/a[1]:0)-(b[1]?b[2]/b[1]:0);
+    else if(st.key==='lines')v=a[3]-b[3]; else if(st.key==='fixable')v=a[4]-b[4]; else v=(a[1]?a[2]/a[1]:0)-(b[1]?b[2]/b[1]:0);
     return st.dir*v;
   });
   const shown=rollAll[kind]?rows:rows.slice(0,ROLL_TOP);
@@ -702,14 +703,16 @@ function renderRollup(kind){
     '</th><th class="c" onclick="sortRoll(\''+kind+'\',\'lost\')">Lost'+sArrow(st,'lost')+
     '</th><th class="c" onclick="sortRoll(\''+kind+'\',\'rate\')">Lost %'+sArrow(st,'rate')+
     '</th><th class="c" onclick="sortRoll(\''+kind+'\',\'lines\')">Lines lost <span class="est">est.</span>'+sArrow(st,'lines')+
+    '</th><th class="c" title="lost units whose every failing check is nesting-attributable and whose edges the nested-anatomy fixer would rewrite" onclick="sortRoll(\''+kind+'\',\'fixable\')">Fixable'+sArrow(st,'fixable')+
     '</th><th>By rule (lost units)</th></tr>';
   shown.forEach(r=>{
-    const chips=block.rules.map((rule,i)=>[rule,r[4][i]]).filter(x=>x[1]>0).sort((x,y)=>y[1]-x[1])
+    const chips=block.rules.map((rule,i)=>[rule,r[5][i]]).filter(x=>x[1]>0).sort((x,y)=>y[1]-x[1])
       .map(x=>'<span>'+esc(x[0])+' <b>'+fmt(x[1])+'</b></span>').join('');
     const tr=el('tr');
     tr.innerHTML='<td>'+orcidLink(r[0])+'<div class="pbar" style="width:'+(100*r[2]/max)+'%;background:var(--drop)"></div></td>'+
       '<td class="c">'+fmt(r[1])+'</td><td class="c" style="color:var(--drop);font-weight:600">'+fmt(r[2])+'</td>'+
       '<td class="c">'+pct(r[2],r[1])+'</td><td class="c">'+fmt(r[3])+'</td>'+
+      '<td class="c">'+fmt(r[4])+'</td>'+
       '<td class="rchips">'+(chips||'<span class="muted">—</span>')+'</td>';
     tbl.appendChild(tr);
   });
@@ -724,11 +727,13 @@ function rollups(){
   document.getElementById('loss-sec').style.display='block';
   const g=R.by_group, cb=R.by_contributor;
   const lostU=g?g.rows.reduce((a,r)=>a+r[2],0):null;
+  const fixU=g?g.rows.reduce((a,r)=>a+r[4],0):null;
   document.getElementById('loss-head').innerHTML=
     'Removed annotation units attributed to the model’s editorial group (providedBy) and to the contributors on the unit’s evidence '+
     '(a unit with two contributors counts once for each). Counts are units; “lines” are the estimated GPAD lines those units would have produced. '+
     (g?'<b>'+fmt(g.rows.length)+'</b> groups':'')+(cb?' · <b>'+fmt(cb.rows.length)+'</b> contributors':'')+
-    (lostU!=null?' · '+fmt(lostU)+' group-attributed lost units':'')+'.';
+    (lostU!=null?' · '+fmt(lostU)+' group-attributed lost units':'')+
+    (fixU!=null?', of which <b>'+fmt(fixU)+'</b> fixable by the nested-anatomy rewrite (every failing check nesting-attributable)':'')+'.';
   renderRollup('group'); renderRollup('contributor');
 }
 

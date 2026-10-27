@@ -23,7 +23,7 @@ from .core import Manifest, StageResult
 AXIS_META_KEYS = ("gpad_lines_est", "contributors")
 
 REJECTS_TSV_HEADER = ("id", "rule", "reason", "detail",
-                      "gpad_lines_est", "contributors", "all_failed_checks")
+                      "gpad_lines_est", "contributors", "all_failed_checks", "fixable")
 
 
 def report_row(item, verdict, stage_id, **extra) -> dict:
@@ -104,7 +104,9 @@ def _write_rejects_tsv(path, rejected, stage_id) -> None:
     with open(path, "w") as fh:
         fh.write("\t".join(REJECTS_TSV_HEADER) + "\n")
         for item, verdict in rejected:
-            detail = {k: v for k, v in verdict.detail.items() if k != "all_failed_checks"}
+            detail = {k: v for k, v in verdict.detail.items()
+                      if k not in ("all_failed_checks", "fixable")}
+            fixable = verdict.detail.get("fixable")
             lines_est = item.meta.get("gpad_lines_est")
             fh.write("\t".join([
                 item.id, stage_id, verdict.reason or "",
@@ -112,4 +114,5 @@ def _write_rejects_tsv(path, rejected, stage_id) -> None:
                 "" if lines_est is None else str(lines_est),
                 "|".join(item.meta.get("contributors") or []),
                 "|".join(verdict.detail.get("all_failed_checks") or []),
+                "" if fixable is None else str(int(fixable)),
             ]) + "\n")

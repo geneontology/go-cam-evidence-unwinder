@@ -636,9 +636,17 @@ and the ledger. RO-dependent checks are empty when no RO is loaded.
 
 | file | one row per | columns |
 |---|---|---|
-| `ledger.tsv` | removed annotation unit | `model_id` (stem), `unit_index`, `modelstate`, `groups`, `contributors`, `removed_by_rule`, `all_failed_checks`, `edges`, `gpad_lines_est`, `title` (lists `\|`-joined) |
-| `ledger.by-group.tsv` | editorial group (`providedBy`; `(none)` bucket) | `group`, `total_units` (from `model_stats`), `lost_units`, `lost_lines_est`, then one lost-units column per unit rule in stage order |
-| `ledger.by-contributor.tsv` | contributor (`(none)` bucket) | `contributor`, `total_units` (every unit, surviving or removed, listing the contributor), `lost_units`, `lost_lines_est`, per-rule columns |
+| `ledger.tsv` | removed annotation unit | `model_id` (stem), `unit_index`, `modelstate`, `groups`, `contributors`, `removed_by_rule`, `all_failed_checks`, `fixable` (1/0), `edges`, `gpad_lines_est`, `title` (lists `\|`-joined) |
+| `ledger.by-group.tsv` | editorial group (`providedBy`; `(none)` bucket) | `group`, `total_units` (from `model_stats`), `lost_units`, `lost_lines_est`, `fixable_units`, then one lost-units column per unit rule in stage order |
+| `ledger.by-contributor.tsv` | contributor (`(none)` bucket) | `contributor`, `total_units` (every unit, surviving or removed, listing the contributor), `lost_units`, `lost_lines_est`, `fixable_units`, per-rule columns |
+
+`fixable` (added 2026-10-26, after the merge of main): a removed unit is fixable iff
+`plan_nested_anatomy_fixes` (main's nested-anatomy fixer) would rewrite at least one
+of its edges AND every key in `all_failed_checks` is in `NESTING_ATTRIBUTABLE_CHECKS`
+(`inconsistent_evidence`, `edge_without_evidence`). This is the definition behind
+`ModelStats.fixable_nonstandard_count` in `gocam_ttl.py`, so the ledger's
+`fixable_units` and Dustin's "Fixable (Non-Standard)" column count the same units.
+The rejects TSVs carry the same flag (empty for Phase A rows, where it is not defined).
 | `models.partial.tsv` | model with `0 < passing < total` (freeze, regenerate survivors) | `model_id`, `modelstate`, `groups`, `total_units`, `passing_units`, `total_lines_est`, `passing_lines_est`, `title` |
 | `models.all-standard.tsv` | model with `passing == total > 0` | same |
 

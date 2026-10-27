@@ -25,9 +25,12 @@ SUMMARY_COLUMNS = ("Phase", "Stage", "Rule", "In", "Removed", "Out",
                    "LinesIn", "LinesRemoved", "LinesOut")
 
 LEDGER_COLUMNS = ("model_id", "unit_index", "modelstate", "groups", "contributors",
-                  "removed_by_rule", "all_failed_checks", "edges", "gpad_lines_est",
-                  "title")
+                  "removed_by_rule", "all_failed_checks", "fixable", "edges",
+                  "gpad_lines_est", "title")
 LEDGER_LIST_COLUMNS = ("groups", "contributors", "all_failed_checks")
+
+# Roll-up fixed columns, in file order after the label column; rule columns follow.
+ROLLUP_BASE_COLUMNS = ["total_units", "lost_units", "lost_lines_est", "fixable_units"]
 
 MODEL_LIST_COLUMNS = ("model_id", "modelstate", "groups", "total_units",
                       "passing_units", "total_lines_est", "passing_lines_est", "title")
@@ -112,6 +115,7 @@ def read_ledger(path):
         row["unit_index"] = int(row["unit_index"]) if row["unit_index"] else None
         row["edges"] = int(row["edges"]) if row["edges"] else 0
         row["gpad_lines_est"] = int(row["gpad_lines_est"]) if row["gpad_lines_est"] else 0
+        row["fixable"] = row.get("fixable", "") == "1"
     return rows
 
 
@@ -145,7 +149,7 @@ def _rollup(ledger_rows, totals, key, unit_rule_ids):
     def bucket(name):
         if name not in agg:
             agg[name] = {"total_units": 0, "lost_units": 0, "lost_lines_est": 0,
-                         **{rule: 0 for rule in unit_rule_ids}}
+                         "fixable_units": 0, **{rule: 0 for rule in unit_rule_ids}}
         return agg[name]
 
     for name, n in totals.items():
@@ -155,6 +159,7 @@ def _rollup(ledger_rows, totals, key, unit_rule_ids):
             b = bucket(name)
             b["lost_units"] += 1
             b["lost_lines_est"] += row["gpad_lines_est"]
+            b["fixable_units"] += int(bool(row.get("fixable")))
             rule = row["removed_by_rule"]
             if rule not in b:
                 b[rule] = 0  # a rule absent from unit_rule_ids still gets counted
@@ -203,7 +208,7 @@ def write_rollups(out_dir, unit_rule_ids):
 
     by_group = _rollup(ledger_rows, group_totals, "groups", rule_cols)
     by_contrib = _rollup(ledger_rows, contributor_totals, "contributors", rule_cols)
-    base = ["total_units", "lost_units", "lost_lines_est"] + rule_cols
+    base = ROLLUP_BASE_COLUMNS + rule_cols
     paths = (
         _write_tsv(out_dir / "ledger.by-group.tsv", ["group"] + base,
                    _rollup_rows(by_group, "group")),
@@ -218,7 +223,7 @@ def read_rollup(path):
     rows = _read_tsv(path)
     with open(path) as fh:
         header = fh.readline().rstrip("\n").split("\t")
-    rule_cols = header[4:]
+    rule_cols = header[1 + len(ROLLUP_BASE_COLUMNS):]
     for row in rows:
         for col in header[1:]:
             row[col] = int(row[col]) if row[col] else 0

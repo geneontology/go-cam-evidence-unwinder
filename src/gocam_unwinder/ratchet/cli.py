@@ -33,6 +33,7 @@ from .model_rules import build_model_rule_registry, load_true_gocam_ids
 from .rules import load_rules
 from .runner import _write_jsonl, _write_rejects_tsv, report_row, run_stage
 from .summary import write_ledger, write_model_lists, write_rollups, write_summary
+from ..gocam_ttl import NESTING_ATTRIBUTABLE_CHECKS
 from .unit_rules import (build_unit_rule_registry, count_model, model_contributors,
                          parse_model_units)
 
@@ -104,6 +105,12 @@ def _run_phase_b(builder, models_manifest, unit_rules, unit_registry, out_dir,
         gcg, units = parse_model_units(builder, item.path)
         total_units = len(units)
         total_lines = _lines(units)
+        # Edges the nested-anatomy fixer would rewrite (bnode ids). A removed
+        # unit is "fixable" iff the fixer touches one of its edges AND every
+        # failing check is nesting-attributable -- the same definition as
+        # ModelStats.fixable_nonstandard_count, so the two reports agree.
+        plan = getattr(builder, "plan_nested_anatomy_fixes", None)
+        fixer_bnodes = {r["bnode_id"] for r in plan(gcg, warn=False)} if plan else set()
         current = units
         for j, rule, adapter in adapters:
             in_count[j] += len(current)
@@ -119,6 +126,10 @@ def _run_phase_b(builder, models_manifest, unit_rules, unit_registry, out_dir,
                     checks = builder.run_all_checks(gcg, unit.payload["annotation"])
                     verdict.detail["all_failed_checks"] = sorted(
                         k for k, flagged in checks.items() if flagged)
+                    annotation = unit.payload["annotation"]
+                    verdict.detail["fixable"] = int(
+                        any(b in fixer_bnodes for b in annotation.edges)
+                        and set(verdict.detail["all_failed_checks"]) <= NESTING_ATTRIBUTABLE_CHECKS)
                     ledger_rows.append({
                         "model_id": item.id,
                         "unit_index": unit.meta.get("unit_index"),
@@ -127,6 +138,7 @@ def _run_phase_b(builder, models_manifest, unit_rules, unit_registry, out_dir,
                         "contributors": unit.meta.get("contributors") or [],
                         "removed_by_rule": rule.id,
                         "all_failed_checks": verdict.detail["all_failed_checks"],
+                        "fixable": verdict.detail["fixable"],
                         "edges": unit.meta.get("edges"),
                         "gpad_lines_est": unit.meta.get("gpad_lines_est"),
                         "title": gcg.title,

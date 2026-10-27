@@ -243,6 +243,36 @@ def test_rollups_are_consistent_with_ledger(run):
         max(1, len(l["contributors"])) for l in ledger)
 
 
+def test_fixable_flag_flows_to_ledger_and_rollups(run):
+    out, _ = run
+    header, rows = _tsv(out / "ledger.tsv")
+    assert "fixable" in header
+    assert all(r["fixable"] in ("0", "1") for r in rows)
+    ledger = read_ledger(out / "ledger.tsv")
+    nesting = {"inconsistent_evidence", "edge_without_evidence"}
+    for l in ledger:
+        assert isinstance(l["fixable"], bool)
+        if l["fixable"]:
+            assert set(l["all_failed_checks"]) <= nesting
+    rules, groups = read_rollup(out / "ledger.by-group.tsv")
+    assert "fixable_units" not in rules and rules[0] == "edge_without_evidence"
+    assert sum(g["fixable_units"] for g in groups) == sum(1 for l in ledger if l["fixable"])
+    assert all(g["fixable_units"] <= g["lost_units"] for g in groups)
+    # reject TSVs: Phase B rows carry 0/1, Phase A rows leave the cell empty
+    rej = sorted((out / "rejects").glob("*.rejects.tsv")) if (out / "rejects").exists() else []
+    rej = rej or sorted(out.glob("phase-*/*.rejects.tsv"))
+    assert rej
+    seen_b = False
+    for path in rej:
+        hdr, rrows = _tsv(path)
+        assert hdr == list(REJECTS_TSV_HEADER)
+        for r in rrows:
+            if r["all_failed_checks"]:
+                seen_b = True
+                assert r["fixable"] in ("0", "1")
+    assert seen_b
+
+
 def test_model_lists_partition(run):
     out, _ = run
     header, partial = _tsv(out / "models.partial.tsv")
@@ -297,8 +327,8 @@ def test_shard_merge_concatenates_ledger_and_recomputes_rollups(tmp_path):
                  "title": "t1", "total_units": 3, "passing_units": 1,
                  "total_lines_est": 7, "passing_lines_est": 1}],
         ledger_rows=[
-            ["m1", "0", "production", "g1", A, "edge_without_evidence", "edge_without_evidence", "2", "3", "t1"],
-            ["m1", "1", "production", "g1", f"{A}|{B}", "enabler_not_gp", "enabler_not_gp|multiple_mf_bp", "1", "3", "t1"],
+            ["m1", "0", "production", "g1", A, "edge_without_evidence", "edge_without_evidence", "1", "2", "3", "t1"],
+            ["m1", "1", "production", "g1", f"{A}|{B}", "enabler_not_gp", "enabler_not_gp|multiple_mf_bp", "0", "1", "3", "t1"],
         ],
         survivors=[("m1", 2, [A])])
     _fake_shard(
@@ -310,7 +340,7 @@ def test_shard_merge_concatenates_ledger_and_recomputes_rollups(tmp_path):
                  "title": "t3", "total_units": 1, "passing_units": 0,
                  "total_lines_est": 4, "passing_lines_est": 0}],
         ledger_rows=[
-            ["m3", "0", "development", "", A, "edge_without_evidence", "edge_without_evidence", "4", "4", "t3"],
+            ["m3", "0", "development", "", A, "edge_without_evidence", "edge_without_evidence", "0", "4", "4", "t3"],
         ],
         survivors=[("m2", 0, [B]), ("m2", 1, [B])])
 
@@ -387,12 +417,12 @@ def _dashboard_out_dir(tmp_path):
                       "contributors": [], "title": "t2",
                       "total_units": 2, "passing_units": 2, "total_lines_est": 2, "passing_lines_est": 2}) + "\n")
     (out / "ledger.by-group.tsv").write_text(
-        "group\ttotal_units\tlost_units\tlost_lines_est\tedge_without_evidence\n"
-        "http://informatics.jax.org\t4\t1\t10\t1\n"
-        "http://zfin.org\t2\t0\t0\t0\n")
+        "group\ttotal_units\tlost_units\tlost_lines_est\tfixable_units\tedge_without_evidence\n"
+        "http://informatics.jax.org\t4\t1\t10\t1\t1\n"
+        "http://zfin.org\t2\t0\t0\t0\t0\n")
     (out / "ledger.by-contributor.tsv").write_text(
-        "contributor\ttotal_units\tlost_units\tlost_lines_est\tedge_without_evidence\n"
-        "https://orcid.org/0000-0000-0000-0001\t4\t1\t10\t1\n")
+        "contributor\ttotal_units\tlost_units\tlost_lines_est\tfixable_units\tedge_without_evidence\n"
+        "https://orcid.org/0000-0000-0000-0001\t4\t1\t10\t1\t1\n")
     groups = tmp_path / "groups.yaml"
     groups.write_text("- {id: 'http://informatics.jax.org', label: MGI}\n"
                       "- {id: 'http://zfin.org', label: ZFIN}\n")
@@ -416,7 +446,7 @@ def test_dashboard_data_carries_lines_set_aside_and_rollups(tmp_path):
     assert m["rows"][0][5:] == [40, 30]
     r = data["rollups"]
     assert r["by_group"]["rules"] == ["edge_without_evidence"]
-    assert r["by_group"]["rows"][0] == ["MGI", 4, 1, 10, [1]]           # URI resolved to label
+    assert r["by_group"]["rows"][0] == ["MGI", 4, 1, 10, 1, [1]]           # URI resolved to label
     assert r["by_contributor"]["rows"][0][0] == "https://orcid.org/0000-0000-0000-0001"
 
 
