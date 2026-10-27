@@ -1,7 +1,7 @@
 """Tests for the reporting axes added 2026-10-26: estimated GPAD lines,
 contributors, the complete failing-check set on reject records, the ledger and
 its roll-ups, the model lists, the shard merge of those files, their surfacing
-in the dashboard, and the GPAD-line validator script (both in later commits).
+in the dashboard, and the GPAD-line validator script.
 
 Fixture facts (verified with an independent rdflib pass over the TTLs):
   66c7d41500000016.ttl  1 unit, 12 edges, 13 lego:evidence triples (one edge
@@ -11,6 +11,7 @@ Fixture facts (verified with an independent rdflib pass over the TTLs):
 """
 
 import json
+import re
 import shutil
 from pathlib import Path
 
@@ -24,6 +25,7 @@ from gocam_unwinder.ratchet.cli import (
     _write_merged_rollups,
     run_ratchet,
 )
+from gocam_unwinder.ratchet.dashboard import build_dashboard, build_data
 from gocam_unwinder.ratchet.runner import REJECTS_TSV_HEADER
 from gocam_unwinder.ratchet.summary import (
     LEDGER_COLUMNS,
@@ -354,3 +356,86 @@ def test_aggregate_stage_stats_sums_lines_and_keeps_none():
     sa = [StageStat(SET_ASIDE_PHASE, 2, "not_true_gocam", 3, 3)]
     merged = _aggregate_stage_stats([a, sa])
     assert [m.phase for m in merged] == ["A", SET_ASIDE_PHASE, "B"]
+
+
+# ----------------------------------------------------------------------
+# dashboard surfaces the new axes
+# ----------------------------------------------------------------------
+
+def _dashboard_out_dir(tmp_path):
+    out = tmp_path / "out"
+    (out / "rejects").mkdir(parents=True)
+    (out / "summary.tsv").write_text(
+        "\t".join(SUMMARY_COLUMNS) + "\n"
+        "A\t01\tskip_prefix\t100\t10\t90\t1000\t100\t900\n"
+        "A\t02\tnot_true_gocam\t90\t5\t85\t900\t0\t900\n"
+        f"{SET_ASIDE_PHASE}\t02\tnot_true_gocam\t5\t0\t5\t\t\t\n"
+        "B\t04\tedge_without_evidence\t200\t5\t195\t900\t50\t850\n")
+    (out / "rejects" / "04-edge_without_evidence.rejects.tsv").write_text(
+        "\t".join(REJECTS_TSV_HEADER) + "\n"
+        + "".join(f"http://m/A{i}#1\tedge_without_evidence\tedge_without_evidence\t"
+                  + json.dumps({"source": "x", "predicate": "part of", "target": "nucleus",
+                                "flagged_edges": 1})
+                  + f"\t10\thttps://orcid.org/0000-0000-0000-000{i}\tedge_without_evidence|multiple_mf_bp\n"
+                  for i in range(5)))
+    (out / "model_stats.jsonl").write_text(
+        json.dumps({"model": "M1", "modelstate": "production", "groups": ["http://informatics.jax.org"],
+                    "contributors": ["https://orcid.org/0000-0000-0000-0001"], "title": "t",
+                    "total_units": 4, "passing_units": 3, "total_lines_est": 40, "passing_lines_est": 30}) + "\n"
+        + json.dumps({"model": "M2", "modelstate": "production", "groups": ["http://zfin.org"],
+                      "contributors": [], "title": "t2",
+                      "total_units": 2, "passing_units": 2, "total_lines_est": 2, "passing_lines_est": 2}) + "\n")
+    (out / "ledger.by-group.tsv").write_text(
+        "group\ttotal_units\tlost_units\tlost_lines_est\tedge_without_evidence\n"
+        "http://informatics.jax.org\t4\t1\t10\t1\n"
+        "http://zfin.org\t2\t0\t0\t0\n")
+    (out / "ledger.by-contributor.tsv").write_text(
+        "contributor\ttotal_units\tlost_units\tlost_lines_est\tedge_without_evidence\n"
+        "https://orcid.org/0000-0000-0000-0001\t4\t1\t10\t1\n")
+    groups = tmp_path / "groups.yaml"
+    groups.write_text("- {id: 'http://informatics.jax.org', label: MGI}\n"
+                      "- {id: 'http://zfin.org', label: ZFIN}\n")
+    return out, groups
+
+
+def test_dashboard_data_carries_lines_set_aside_and_rollups(tmp_path):
+    out, groups = _dashboard_out_dir(tmp_path)
+    data = build_data(out, "rules", groups_yaml=str(groups))
+    h = data["headline"]
+    assert h["lines_in"] == 1000 and h["unit_lines"] == 900 and h["standard_lines"] == 850
+    assert h["set_aside_models"] == 5
+    assert data["set_aside"] == [{"index": "02", "rule_id": "not_true_gocam", "models": 5}]
+    assert [s["phase"] for s in data["stages"]] == ["A", "A", "B"]       # set-aside is not a stage
+    ewe = next(s for s in data["stages"] if s["rule_id"] == "edge_without_evidence")
+    assert (ewe["lines_in"], ewe["lines_removed"], ewe["lines_out"]) == (900, 50, 850)
+    assert ewe["patterns"][0]["count"] == 5 and ewe["patterns"][0]["lines"] == 50
+    m = data["models"]
+    assert m["total_lines"] == 42 and m["passing_lines"] == 32
+    assert m["partial"] == 1 and m["all_standard"] == 1
+    assert m["rows"][0][5:] == [40, 30]
+    r = data["rollups"]
+    assert r["by_group"]["rules"] == ["edge_without_evidence"]
+    assert r["by_group"]["rows"][0] == ["MGI", 4, 1, 10, [1]]           # URI resolved to label
+    assert r["by_contributor"]["rows"][0][0] == "https://orcid.org/0000-0000-0000-0001"
+
+
+def test_dashboard_reads_old_six_column_summary(tmp_path):
+    out = tmp_path / "out"
+    (out / "rejects").mkdir(parents=True)
+    (out / "summary.tsv").write_text("Phase\tStage\tRule\tIn\tRemoved\tOut\n"
+                                     "A\t01\tskip_prefix\t100\t10\t90\n")
+    data = build_data(out, "rules")
+    assert data["stages"][0]["lines_in"] is None and data["headline"]["lines_in"] is None
+    assert data["rollups"] is None and data["set_aside"] == []
+
+
+def test_dashboard_html_contains_new_tables(tmp_path):
+    out, groups = _dashboard_out_dir(tmp_path)
+    html_path = tmp_path / "dashboard.html"
+    build_dashboard(out, "rules", html_path, groups_yaml=str(groups))
+    html = html_path.read_text()
+    assert 'id="contrib-table"' in html and 'id="group-table"' in html
+    assert 'id="setaside"' in html and "GPAD lines" in html and "est." in html
+    assert "<script src=" not in html and 'rel="stylesheet"' not in html   # still self-contained
+    data = json.loads(re.search(r"const DATA = (\{.*?\});\nlet SEL", html, re.S).group(1))
+    assert data["rollups"]["by_contributor"]["rows"][0][2] == 1
