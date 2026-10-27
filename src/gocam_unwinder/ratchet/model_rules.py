@@ -28,11 +28,18 @@ LEGO_MODELSTATE = rdflib.URIRef("http://geneontology.org/lego/modelstate")
 
 
 def _model_state(graph: rdflib.Graph):
-    """Return the lego:modelstate of the model-level owl:Ontology subject, or None."""
-    for model in graph.subjects(rdflib.RDF.type, rdflib.OWL.Ontology):
-        for state in graph.objects(model, LEGO_MODELSTATE):
-            return str(state)
-    return None
+    """Return the lego:modelstate of the model-level owl:Ontology subject, or None.
+
+    Same semantics as GoCamGraph.get_modelstate(): a model may carry several
+    modelstate values, and "delete" wins over the others regardless of rdflib's
+    object iteration order; otherwise the first value is returned.
+    """
+    states = [str(state)
+              for model in graph.subjects(rdflib.RDF.type, rdflib.OWL.Ontology)
+              for state in graph.objects(model, LEGO_MODELSTATE)]
+    if "delete" in states:
+        return "delete"
+    return states[0] if states else None
 
 
 def modelstate_gate(ctx, item, drop_states=("delete",)) -> Verdict:

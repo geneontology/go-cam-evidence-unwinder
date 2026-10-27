@@ -101,6 +101,7 @@ reproduced in `docs/plans/2026-06-05-remaining-std-annot-criteria-design.md`.
 | A · gate (**R1**) | — | `not_true_gocam` | model-gate | published true-GO-CAM ID set | n/a (membership) |
 | B · 1 cheap | 15 | `edge_without_evidence` | evidence | none | ✅ trivial |
 | B · 1 cheap | 13 | `enabler_not_gp` | relation | GP allowlist | ⚠️ moderate |
+| B · 1 cheap | — | `no_gp_at_all` | gp-presence | GP allowlist | ⚠️ moderate |
 | B · 2 GO-aspect | 3 | `invalid_gp_cc_relation` | relation | GO + GP | ⚠️ moderate |
 | B · 2 GO-aspect | 6 | `invalid_mf_cc_relation` | relation | GO | ⚠️ moderate |
 | B · 2 GO-aspect | 10 | `invalid_bp_cc_relation` | relation | GO + anatomy | ⚠️ moderate |

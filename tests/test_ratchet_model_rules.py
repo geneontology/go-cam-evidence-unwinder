@@ -35,6 +35,30 @@ def test_modelstate_delete_removed(tmp_path):
     assert modelstate_gate(None, _state_model(tmp_path, "p.ttl", "production")).keep is True
 
 
+_TWO_STATE_TTL = """@prefix owl: <http://www.w3.org/2002/07/owl#> .
+@prefix lego: <http://geneontology.org/lego/> .
+<http://model.geneontology.org/M2> a owl:Ontology ;
+    lego:modelstate "production" ;
+    lego:modelstate "delete" .
+"""
+
+
+def test_modelstate_delete_wins_among_multiple_values(tmp_path):
+    """A model with both "production" and "delete" is removed (delete wins,
+    whatever order rdflib yields the values in)."""
+    p = tmp_path / "two.ttl"
+    p.write_text(_TWO_STATE_TTL)
+    v = modelstate_gate(None, Item(id="two", path=p))
+    assert v.keep is False
+    assert v.detail.get("modelstate") == "delete"
+
+
+def test_modelstate_delete_wins_on_fixture():
+    v = modelstate_gate(None, Item(id="multi_modelstate_delete_example",
+                                   path=RES / "multi_modelstate_delete_example.ttl"))
+    assert v.keep is False
+
+
 def test_modelstate_missing_is_kept(tmp_path):
     p = tmp_path / "n.ttl"
     p.write_text('@prefix owl: <http://www.w3.org/2002/07/owl#> .\n'

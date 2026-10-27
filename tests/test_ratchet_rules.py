@@ -76,8 +76,8 @@ def test_seed_rules_dir_loads():
     assert "model_disconnected_individuals" in [
         r.id for r in load_rules("rules", phase="model", include_disabled=True)]
 
-    # Phase B: 12 unit checks in tier order; edge_without_evidence is python now.
-    assert len(unit_ids) == 12
+    # Phase B: 13 unit checks in tier order; edge_without_evidence is python now.
+    assert len(unit_ids) == 13
     assert unit_ids[0] == "edge_without_evidence"
     assert unit_ids[-1] == "inconsistent_evidence"
     by_id = {r.id: r for r in unit_rules}
