@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """Compare the ratchet's estimated GPAD line counts with a real GPAD export.
 
-Inputs: a run's ``model_stats.jsonl`` (per model: ``total_lines_est``) and a
-directory of per-model GPAD files named ``<model_id>.gpad``. In a GPAD file a
-line starting with ``!`` is a header; every other non-blank line is one
-annotation line.
+Inputs: a run's ``model_stats.jsonl`` (per model: ``total_lines_est``) and
+EITHER a directory of per-model GPAD files named ``<model_id>.gpad`` (a line
+starting with ``!`` is a header; every other non-blank line is one annotation
+line) OR a TSV of pre-counted actuals (``model_id<TAB>actual_lines``, header
+row, further columns ignored) for when the GPAD files live on another host.
 
 Prints one row per model (model_id, est, actual, diff) and an aggregate block:
 sum est, sum actual, ratio, exact matches, median absolute error, the N worst
@@ -14,6 +15,8 @@ from the aggregates (they say nothing about the estimate).
     python3 scripts/validate_gpad_lines.py \\
         --model-stats target_YYYYMMDD/ratchet/model_stats.jsonl \\
         --gpad-dir /path/to/gpad --worst 20 [--no-per-model]
+    python3 scripts/validate_gpad_lines.py \\
+        --model-stats ... --gpad-actuals target/gpad-actuals-20260828.tsv
 """
 
 import argparse
@@ -32,6 +35,19 @@ def count_gpad_lines(path):
     return n
 
 
+def read_actuals_tsv(path):
+    """``{model_id: actual_lines}`` from a header-first TSV (extra columns ignored)."""
+    actuals = {}
+    with open(path, encoding="utf-8") as fh:
+        header = fh.readline().rstrip("\n").split("\t")
+        col = header.index("actual_lines") if "actual_lines" in header else 1
+        for line in fh:
+            parts = line.rstrip("\n").split("\t")
+            if len(parts) > col and parts[0]:
+                actuals[parts[0]] = int(parts[col])
+    return actuals
+
+
 def read_model_stats(path):
     records = []
     for line in Path(path).read_text().splitlines():
@@ -41,18 +57,28 @@ def read_model_stats(path):
     return records
 
 
-def compare(model_stats_path, gpad_dir, worst=20):
-    gpad_dir = Path(gpad_dir)
+def compare(model_stats_path, gpad_dir=None, worst=20, actuals=None):
+    """``actuals`` (``{model_id: lines}``) replaces ``gpad_dir`` when given."""
+    gpad_dir = Path(gpad_dir) if gpad_dir is not None else None
     rows = []
     missing = []
     for rec in read_model_stats(model_stats_path):
         model_id = rec["model"]
         est = rec.get("total_lines_est")
-        gpad = gpad_dir / f"{model_id}.gpad"
-        if est is None or not gpad.exists():
+        if est is None:
             missing.append(model_id)
             continue
-        actual = count_gpad_lines(gpad)
+        if actuals is not None:
+            if model_id not in actuals:
+                missing.append(model_id)
+                continue
+            actual = actuals[model_id]
+        else:
+            gpad = gpad_dir / f"{model_id}.gpad"
+            if not gpad.exists():
+                missing.append(model_id)
+                continue
+            actual = count_gpad_lines(gpad)
         rows.append({"model_id": model_id, "est": est, "actual": actual,
                      "diff": est - actual})
     sum_est = sum(r["est"] for r in rows)
@@ -98,14 +124,17 @@ def main(argv=None):
     ap = argparse.ArgumentParser(
         description="Validate ratchet GPAD line estimates against real per-model GPAD files.")
     ap.add_argument("--model-stats", required=True, help="A run's model_stats.jsonl.")
-    ap.add_argument("--gpad-dir", required=True,
-                    help="Directory of <model_id>.gpad files (one per model).")
+    src = ap.add_mutually_exclusive_group(required=True)
+    src.add_argument("--gpad-dir", help="Directory of <model_id>.gpad files (one per model).")
+    src.add_argument("--gpad-actuals",
+                    help="TSV of pre-counted actuals: model_id<TAB>actual_lines, header row.")
     ap.add_argument("--worst", type=int, default=20, help="How many worst models to list.")
     ap.add_argument("--no-per-model", action="store_true",
                     help="Print only the aggregate block.")
     args = ap.parse_args(argv)
 
-    result = compare(args.model_stats, args.gpad_dir, worst=args.worst)
+    actuals = read_actuals_tsv(args.gpad_actuals) if args.gpad_actuals else None
+    result = compare(args.model_stats, args.gpad_dir, worst=args.worst, actuals=actuals)
     if not args.no_per_model:
         print("model_id\test\tactual\tdiff")
         for r in result["rows"]:

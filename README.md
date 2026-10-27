@@ -124,9 +124,14 @@ GPAD lines), `ledger.tsv` (one row per removed annotation unit: model, rule,
 the complete set of failing checks, groups, contributors, edges, estimated
 lines), `ledger.by-group.tsv` / `ledger.by-contributor.tsv` roll-ups,
 `models.partial.tsv` (models to freeze and regenerate) and
-`models.all-standard.tsv`. GPAD line counts are estimates (one per
-(edge, evidence) pair); check them against a real per-model GPAD export with
-`make ratchet-validate-lines GPAD_DIR=/path/to/<model_id>.gpad/files`.
+`models.all-standard.tsv`. GPAD line counts are estimates that replay
+minerva's `--lego-to-gpad-sparql` export rule over each annotation unit (one
+line per gene-product-anchored qualifier and evidence, extension edges folded
+in, identical lines deduplicated -- definition in the design doc); check them
+against a real per-model GPAD export with
+`make ratchet-validate-lines GPAD_DIR=/path/to/<model_id>.gpad/files`, or
+against a pre-counted `model_id<TAB>actual_lines` TSV with
+`make ratchet-validate-lines GPAD_ACTUALS=target/gpad-actuals-YYYYMMDD.tsv`.
 
 Notes for remote / restricted hosts:
 

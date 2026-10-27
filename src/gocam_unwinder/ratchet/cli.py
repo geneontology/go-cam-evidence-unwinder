@@ -167,6 +167,7 @@ def _run_phase_b(builder, models_manifest, unit_rules, unit_registry, out_dir,
             "passing_units": len(current),
             "total_lines_est": total_lines,
             "passing_lines_est": _lines(current),
+            "total_evidence_pairs": sum(u.meta.get("evidence_pairs", 0) for u in units),
         })
 
     stage_stats = []

@@ -7,7 +7,17 @@ Fixture facts (verified with an independent rdflib pass over the TTLs):
   66c7d41500000016.ttl  1 unit, 12 edges, 13 lego:evidence triples (one edge
                         has no evidence), one contributor everywhere.
   MGI_MGI_1100089.ttl   29 units, 99 lego:evidence triples, 6 contributors.
-  SYNGO_5371 / R-HSA-9937080  12 / 30 estimated lines (Phase A counting pass).
+  SYNGO_5371 / R-HSA-9937080  12 / 30 evidence pairs (Phase A counting pass).
+
+Estimated GPAD lines (minerva's export rule, ``unit_rules.unit_gpad_lines``);
+every fixture present in the pipeline's 2026-08-28 per-model GPAD export has
+exactly this many non-header lines there:
+  66c7d41500000016 12 (a has_input edge folds into its enables line, so one
+  fewer than the 13 evidence pairs); MGI_MGI_1100089 40, of which the one
+  failing unit (#6) carries 2; 57c82fad00000252 6; SYNGO_5371 6;
+  R-HSA-9937080 0 (Reactome individuals are typed by REACTO classes, never a
+  GO term, so no GP -> GO candidate exists; the model is also absent from the
+  export).
 """
 
 import importlib.util
@@ -37,11 +47,15 @@ from gocam_unwinder.ratchet.summary import (
     read_rollup,
 )
 from gocam_unwinder.ratchet.unit_rules import (
+    GpadLine,
     count_model,
+    evidence_pairs,
     gpad_lines_estimate,
     model_contributors,
+    model_gpad_lines,
     parse_model_units,
     unit_contributors,
+    unit_gpad_lines,
 )
 
 RES = Path("resources/test")
@@ -76,25 +90,153 @@ def test_unit_meta_carries_lines_and_contributors(builder):
     assert len(units) == 1
     meta = units[0].meta
     assert meta["edges"] == 12
-    assert meta["gpad_lines_est"] == 13
+    assert meta["gpad_lines_est"] == 12
+    assert meta["evidence_pairs"] == 13
     assert meta["contributors"] == [ORCID_8769]
     assert model_contributors(gcg) == [ORCID_8769]
     annotation = units[0].payload["annotation"]
-    assert gpad_lines_estimate(annotation) == sum(
+    assert gpad_lines_estimate(annotation, gcg, builder) == 12
+    assert evidence_pairs(annotation) == 13 == sum(
         len(e.evidence_uris) for e in annotation.edges.values())
+    assert model_gpad_lines(gcg, builder) == [12]
     assert unit_contributors(gcg, annotation) == [ORCID_8769]
 
 
 def test_unit_meta_totals_match_model_count(builder):
     gcg, units = parse_model_units(builder, RES / "MGI_MGI_1100089.ttl")
     assert len(units) == 29
-    assert sum(u.meta["gpad_lines_est"] for u in units) == 99
+    assert sum(u.meta["gpad_lines_est"] for u in units) == 40
+    assert sum(u.meta["evidence_pairs"] for u in units) == 99
+    assert units[6].meta["gpad_lines_est"] == 2          # the one failing unit
     unit_level = set().union(*(set(u.meta["contributors"]) for u in units))
     assert unit_level and unit_level <= set(model_contributors(gcg))
     assert len(model_contributors(gcg)) == 6
     counted = count_model(builder, RES / "MGI_MGI_1100089.ttl")
-    assert counted["total_units"] == 29 and counted["gpad_lines_est"] == 99
+    assert counted["total_units"] == 29 and counted["gpad_lines_est"] == 40
+    assert counted["evidence_pairs"] == 99
     assert counted["groups"] and counted["modelstate"] == "production"
+
+
+# ----------------------------------------------------------------------
+# the GPAD line rule, clause by clause, on a synthetic model
+# ----------------------------------------------------------------------
+
+OBO = "http://purl.obolibrary.org/obo/"
+MGI = "http://identifiers.org/mgi/MGI:"
+ORCID_1 = "https://orcid.org/0000-0000-0000-0001"
+
+
+def _gpad_model():
+    """Seven disconnected units, each exercising one clause of
+    ``unit_gpad_lines`` (expected lines in the comments)."""
+    out = ["@prefix : <http://model.geneontology.org/gpadtest/> .",
+           "@prefix owl: <http://www.w3.org/2002/07/owl#> .",
+           "@prefix rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .",
+           "@prefix dc: <http://purl.org/dc/elements/1.1/> .",
+           "@prefix obo: <%s> ." % OBO,
+           "@prefix lego: <http://geneontology.org/lego/> .",
+           "<http://model.geneontology.org/gpadtest> a owl:Ontology ."]
+    n = [0]
+
+    def ind(name, *types):
+        out.append(":%s a owl:NamedIndividual , %s ." % (name, " , ".join(types)))
+
+    def ev(eco, ref, date="2024-01-01", with_from=None, source=True, contributor=ORCID_1):
+        n[0] += 1
+        name = "ev%d" % n[0]
+        parts = ["a owl:NamedIndividual , obo:%s" % eco, 'dc:contributor "%s"' % contributor,
+                 'dc:date "%s"' % date]
+        if source:
+            parts.append('dc:source "%s"' % ref)
+        if with_from:
+            parts.append('lego:evidence-with "%s"' % with_from)
+        out.append(":%s %s ." % (name, " ; ".join(parts)))
+        return ":" + name
+
+    def edge(s, p, o, *evidence):
+        out.append(":%s obo:%s :%s ." % (s, p, o))
+        out.append("[ a owl:Axiom ; owl:annotatedSource :%s ; owl:annotatedProperty obo:%s ; "
+                   "owl:annotatedTarget :%s ; %s ] ." % (
+                       s, p, o, " ; ".join("lego:evidence %s" % e for e in evidence)))
+
+    # A: enables + involved_in + is_active_in; has_input folds into the enables line -> 3
+    ind("gpA", "<%s1>" % MGI); ind("gpA2", "<%s2>" % MGI)
+    ind("mfA", "obo:GO_0016301"); ind("bpA", "obo:GO_0007165"); ind("ccA", "obo:GO_0005737")
+    edge("mfA", "RO_0002333", "gpA", ev("ECO_0000314", "PMID:1"))
+    edge("mfA", "BFO_0000050", "bpA", ev("ECO_0000315", "PMID:2"))
+    edge("mfA", "RO_0002233", "gpA2", ev("ECO_0000314", "PMID:2"))
+    edge("mfA", "BFO_0000066", "ccA", ev("ECO_0000314", "PMID:3"))
+    # B: root MF with ND evidence -> 1 alone, 0 in the model (MGI:1 has a specific MF in A)
+    ind("gpB", "<%s1>" % MGI); ind("mfB", "obo:GO_0003674")
+    edge("mfB", "RO_0002333", "gpB", ev("ECO_0000307", "GO_REF:0000015"))
+    # C: the same enables line as A (same GP type, MF class, evidence metadata) -> 1 alone, dup in model
+    ind("gpC", "<%s1>" % MGI); ind("mfC", "obo:GO_0016301")
+    edge("mfC", "RO_0002333", "gpC", ev("ECO_0000314", "PMID:1"))
+    # D: two identical evidence individuals dedupe to 1; evidence without dc:source yields nothing -> 1
+    ind("gpD", "<%s4>" % MGI); ind("mfD", "obo:GO_0004672"); ind("bpD", "obo:GO_0007165")
+    edge("mfD", "RO_0002333", "gpD", ev("ECO_0000314", "PMID:5"), ev("ECO_0000314", "PMID:5"))
+    edge("mfD", "BFO_0000050", "bpD", ev("ECO_0000315", "PMID:6", source=False))
+    # E: NOT via complementOf -> 1 line with operator NOT
+    ind("gpE", "<%s5>" % MGI)
+    out.append(":mfE a owl:NamedIndividual , [ a owl:Class ; owl:complementOf obo:GO_0004674 ] .")
+    edge("mfE", "RO_0002333", "gpE", ev("ECO_0000314", "PMID:7"))
+    # F: a GP node with two types -> one line per type = 2
+    ind("gpF", "<%s7>" % MGI, "<%s8>" % MGI); ind("mfF", "obo:GO_0016301")
+    edge("mfF", "RO_0002333", "gpF", ev("ECO_0000314", "PMID:8"))
+    # G: regulation filter: GP annotated to GO:0030511 (positive regulation of TGF-beta
+    #    receptor signaling) and to the regulated GO:0007179 -> the latter is dropped -> 3
+    ind("gpG", "<%s9>" % MGI); ind("mfG1", "obo:GO_0004672"); ind("mfG2", "obo:GO_0016301")
+    ind("bpG1", "obo:GO_0030511"); ind("bpG2", "obo:GO_0007179")
+    edge("mfG1", "RO_0002333", "gpG", ev("ECO_0000314", "PMID:9"))
+    edge("mfG1", "BFO_0000050", "bpG1", ev("ECO_0000315", "PMID:10"))
+    edge("mfG2", "RO_0002333", "gpG", ev("ECO_0000314", "PMID:11"))
+    edge("mfG2", "BFO_0000050", "bpG2", ev("ECO_0000315", "PMID:12"))
+    return "\n".join(out) + "\n"
+
+
+@pytest.fixture(scope="module")
+def gpad_units(tmp_path_factory, builder):
+    path = tmp_path_factory.mktemp("gpad") / "gpadtest.ttl"
+    path.write_text(_gpad_model())
+    gcg, units = parse_model_units(builder, path)
+    by_gp = {}
+    for u in units:
+        for ind in u.payload["annotation"].individuals:
+            local = str(ind).rsplit("/", 1)[-1]
+            if local.startswith("gp") and local[2] in "ABCDEFG" and len(local) == 3:
+                by_gp[local[2]] = u
+    assert sorted(by_gp) == list("ABCDEFG") and len(units) == 7
+    return gcg, by_gp
+
+
+def test_gpad_rule_unit_alone(gpad_units, builder):
+    gcg, by = gpad_units
+    alone = {k: gpad_lines_estimate(u.payload["annotation"], gcg, builder) for k, u in by.items()}
+    assert alone == {"A": 3, "B": 1, "C": 1, "D": 1, "E": 1, "F": 2, "G": 3}
+    pairs = {k: u.meta["evidence_pairs"] for k, u in by.items()}
+    assert pairs == {"A": 4, "B": 1, "C": 1, "D": 3, "E": 1, "F": 1, "G": 4}
+    lines = unit_gpad_lines(by["A"].payload["annotation"], gcg, builder).lines
+    assert {str(l.qualifier).rsplit("/", 1)[1] for l in lines} == {"RO_0002327", "RO_0002331", "RO_0002432"}
+    enables = next(l for l in lines if str(l.qualifier).endswith("RO_0002327"))
+    assert isinstance(enables, GpadLine) and enables.operator == "NONE"
+    # the has_input edge is an extension of the enables line only when its evidence
+    # shares the line's reference (PMID:2 != PMID:1 here), so no extension at all
+    assert enables.extensions == frozenset()
+    assert enables.references == frozenset({"PMID:1"})
+    not_line = next(iter(unit_gpad_lines(by["E"].payload["annotation"], gcg, builder).lines))
+    assert not_line.operator == "NOT" and str(not_line.go_class).endswith("GO_0004674")
+    # the regulation filter needs GO's logical definitions: without a builder G keeps 4
+    assert gpad_lines_estimate(by["G"].payload["annotation"], gcg, None) == 4
+
+
+def test_gpad_rule_model_wide(gpad_units, builder):
+    gcg, by = gpad_units
+    est = {k: u.meta["gpad_lines_est"] for k, u in by.items()}
+    assert est["B"] == 0                                    # root MF suppressed model-wide
+    assert est["A"] + est["C"] == 3 and 0 in (est["A"], est["C"])   # the duplicate counts once
+    assert (est["D"], est["E"], est["F"], est["G"]) == (1, 1, 2, 3)
+    assert sum(est.values()) == 10 == sum(model_gpad_lines(gcg, builder))
+    assert sum(model_gpad_lines(gcg, None)) == 11            # G keeps its regulated line
 
 
 # ----------------------------------------------------------------------
@@ -128,7 +270,7 @@ def test_summary_has_line_columns_and_set_aside_row(run):
     by_rule = {(r["Phase"], r["Rule"]): r for r in rows}
 
     skip = by_rule[("A", "skip_prefix")]
-    assert skip["Removed"] == "2" and skip["LinesRemoved"] == "42"   # 12 + 30
+    assert skip["Removed"] == "2" and skip["LinesRemoved"] == "6"    # 6 + 0
     ntg = by_rule[("A", "not_true_gocam")]
     assert ntg["Removed"] == "1" and ntg["LinesRemoved"] == "0"     # set aside, not lost
     aside = by_rule[(SET_ASIDE_PHASE, "not_true_gocam")]
@@ -139,7 +281,7 @@ def test_summary_has_line_columns_and_set_aside_row(run):
     total_lines = sum(r["total_lines_est"] for r in stats)
     passing_lines = sum(r["passing_lines_est"] for r in stats)
     chain = [r for r in rows if r["Phase"] in ("A", "B")]
-    assert chain[0]["LinesIn"] == str(total_lines + 42)
+    assert chain[0]["LinesIn"] == str(total_lines + 6)
     b_rows = [r for r in chain if r["Phase"] == "B"]
     assert b_rows[0]["LinesIn"] == str(total_lines)
     assert b_rows[-1]["LinesOut"] == str(passing_lines)
@@ -155,8 +297,8 @@ def test_phase_a_reject_records_carry_counts_except_set_aside(run):
     header, rows = _tsv(out / "phase-a" / "01-skip_prefix.rejects.tsv")
     assert header == list(REJECTS_TSV_HEADER)
     by_id = {r["id"]: r for r in rows}
-    assert by_id["R-HSA-9937080"]["gpad_lines_est"] == "30"
-    assert by_id["SYNGO_5371"]["gpad_lines_est"] == "12"
+    assert by_id["R-HSA-9937080"]["gpad_lines_est"] == "0"
+    assert by_id["SYNGO_5371"]["gpad_lines_est"] == "6"
     assert by_id["SYNGO_5371"]["contributors"].count("|") == 2        # 3 ORCIDs
     _, aside = _tsv(out / "phase-a" / "02-not_true_gocam.rejects.tsv")
     assert aside[0]["id"] == "5b318d0900000481"
@@ -164,7 +306,7 @@ def test_phase_a_reject_records_carry_counts_except_set_aside(run):
     # the JSONL report rows carry the same axis fields
     report = _jsonl(out / "phase-a" / "reports" / "01-skip_prefix.jsonl")
     removed = {r["id"]: r for r in report if r["decision"] == "remove"}
-    assert removed["R-HSA-9937080"]["gpad_lines_est"] == 30
+    assert removed["R-HSA-9937080"]["gpad_lines_est"] == 0
     assert isinstance(removed["R-HSA-9937080"]["contributors"], list)
 
 
@@ -186,7 +328,7 @@ def test_unit_reject_record_carries_complete_failure_set(run):
     assert rec["decision"] == "remove"
     assert rec["all_failed_checks"] == ["edge_without_evidence", "inconsistent_evidence",
                                         "multiple_mf_anatomy", "multiple_mf_bp"]
-    assert rec["gpad_lines_est"] == 12 and len(rec["contributors"]) == 2
+    assert rec["gpad_lines_est"] == 6 and len(rec["contributors"]) == 2
     kept = next(r for r in report if r["decision"] == "keep")
     assert "all_failed_checks" not in kept and "gpad_lines_est" in kept
 
@@ -208,7 +350,7 @@ def test_ledger_matches_summary(run):
     assert row["removed_by_rule"] == "edge_without_evidence"
     assert set(row["all_failed_checks"]) == {"edge_without_evidence", "inconsistent_evidence",
                                              "multiple_mf_anatomy", "multiple_mf_bp"}
-    assert row["edges"] == 14 and row["gpad_lines_est"] == 12
+    assert row["edges"] == 14 and row["gpad_lines_est"] == 6
     assert row["title"].startswith("C. elegans")
     # the ledger and the surviving manifest partition the Phase B units
     survivors = _jsonl(out / "SB-final.units.manifest.jsonl")
@@ -236,7 +378,7 @@ def test_rollups_are_consistent_with_ledger(run):
     crules, contribs = read_rollup(out / "ledger.by-contributor.tsv")
     assert crules == rules
     me = next(c for c in contribs if c["contributor"] == ORCID_8769)
-    assert me["total_units"] == 1 and me["lost_units"] == 1 and me["lost_lines_est"] == 13
+    assert me["total_units"] == 1 and me["lost_units"] == 1 and me["lost_lines_est"] == 12
     assert me["edge_without_evidence"] == 1
     # a unit with k contributors counts once per contributor
     assert sum(c["lost_units"] for c in contribs) == sum(
@@ -283,7 +425,7 @@ def test_model_lists_partition(run):
     assert {r["model_id"] for r in all_std} == {"MGI_MGI_1927246"}
     mgi = next(r for r in partial if r["model_id"] == "MGI_MGI_1100089")
     assert (mgi["total_units"], mgi["passing_units"]) == ("29", "28")
-    assert (mgi["total_lines_est"], mgi["passing_lines_est"]) == ("99", "95")
+    assert (mgi["total_lines_est"], mgi["passing_lines_est"]) == ("40", "38")
     stats = {s["model"]: s for s in read_model_stats(out / "model_stats.jsonl")}
     assert set(stats) == {"MGI_MGI_1100089", "MGI_MGI_1927246", "66c7d41500000016",
                           "61452e3d00000323", "57c82fad00000252"}
@@ -291,6 +433,7 @@ def test_model_lists_partition(run):
     for model, s in stats.items():
         assert (model in listed) == (s["passing_units"] > 0)
         assert "contributors" in s and "total_lines_est" in s and "passing_lines_est" in s
+        assert s["total_evidence_pairs"] >= s["total_lines_est"]
 
 
 # ----------------------------------------------------------------------
@@ -513,6 +656,19 @@ def test_validator_computes_aggregates(tmp_path):
     assert res["worst"][0]["diff"] == -4
     rows = {r["model_id"]: (r["est"], r["actual"], r["diff"]) for r in res["rows"]}
     assert rows == {"m1": (3, 3, 0), "m2": (2, 1, 1), "m3": (6, 10, -4)}
+
+
+def test_validator_reads_precounted_actuals(tmp_path):
+    mod = _load_validator()
+    stats, gpad = _gpad_fixture(tmp_path)
+    tsv = tmp_path / "actuals.tsv"
+    tsv.write_text("model_id\tactual_lines\tblank_lines\nm1\t3\t0\nm2\t1\t0\nm3\t10\t0\n")
+    actuals = mod.read_actuals_tsv(tsv)
+    assert actuals == {"m1": 3, "m2": 1, "m3": 10}
+    res = mod.compare(stats, None, worst=2, actuals=actuals)
+    assert res["n"] == 3 and res["missing"] == ["m4"] and res["exact"] == 1
+    assert res["sum_est"] == 11 and res["sum_actual"] == 14
+    assert mod.main(["--model-stats", str(stats), "--gpad-actuals", str(tsv), "--no-per-model"]) == 0
 
 
 def test_validator_main_prints_report(tmp_path, capsys):

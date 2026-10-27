@@ -290,12 +290,13 @@ ratchet-dashboard: $(GROUPS_YAML)
 # per-model GPAD export: a directory of <model_id>.gpad files, which lives on
 # the host that ran minerva's --lego-to-gpad-sparql, not here.
 #   make ratchet-validate-lines GPAD_DIR=/path/to/gpad [RATCHET_OUT=target_YYYYMMDD/ratchet]
+#   make ratchet-validate-lines GPAD_ACTUALS=target/gpad-actuals-YYYYMMDD.tsv  (pre-counted TSV)
 .PHONY: ratchet-validate-lines
 ratchet-validate-lines:
-	@test -n "$(GPAD_DIR)" || { echo "GPAD_DIR=<dir of <model_id>.gpad files> is required"; exit 2; }
+	@test -n "$(GPAD_DIR)$(GPAD_ACTUALS)" || { echo "GPAD_DIR=<dir of <model_id>.gpad files> or GPAD_ACTUALS=<model_id/actual_lines TSV> is required"; exit 2; }
 	python3 scripts/validate_gpad_lines.py \
 		--model-stats $(RATCHET_OUT)/model_stats.jsonl \
-		--gpad-dir $(GPAD_DIR) \
+		$(if $(GPAD_ACTUALS),--gpad-actuals $(GPAD_ACTUALS),--gpad-dir $(GPAD_DIR)) \
 		--no-per-model
 
 # Quick smoke run over the bundled test fixtures (no corpus download needed).

@@ -570,43 +570,122 @@ lines**, at model and annotation-unit level. Branch
 
 ### `gpad_lines_est` — the estimate's definition
 
-For one annotation unit, `gpad_lines_est = Σ over the unit's edges of
-len(edge.evidence_uris)`, i.e. the number of (edge, evidence individual) pairs
-over ALL the unit's edges (`unit_rules.gpad_lines_estimate`). Rationale:
-minerva's `--lego-to-gpad-sparql` emits one GPAD line per (backbone edge,
-evidence). Known bias: minerva folds extension edges (`occurs_in`, `has_input`,
-…) into the backbone line's extension column, so a unit whose extension edges
-carry their own evidence is **over-counted** here; an edge with no evidence
-contributes 0. It is named an estimate everywhere and
-`scripts/validate_gpad_lines.py` (`make ratchet-validate-lines GPAD_DIR=…`)
-measures it against a real per-model GPAD export (`<model_id>.gpad`, `!`
-lines are headers): per-model est vs actual, sum ratio, exact matches, median
-absolute error, worst models. Fixture check: every fixture's total equals its
-count of `lego:evidence` triples on reified axioms (MGI_MGI_1100089: 99;
-66c7d41500000016: 13 over 12 edges, one edge evidence-less).
+**Since 2026-10-26 (evening): minerva's export rule, replayed per unit.** The
+first definition (`Σ over the unit's edges of len(edge.evidence_uris)`, one
+line per (edge, evidence) pair) over-counted by 1.81x against the pipeline's
+real per-model GPAD (45,822 models, 5,993 exact); it is kept as
+`unit_rules.evidence_pairs` (unit meta `evidence_pairs`, `model_stats.jsonl`
+`total_evidence_pairs`) as a plain size measure. `gpad_lines_est` now comes
+from `unit_rules.unit_gpad_lines` / `model_gpad_lines`, derived by reading
+minerva's `--lego-to-gpad-sparql` implementation (geneontology/minerva
+8977c33): `GPADSPARQLExport.getGPAD`, `gpad-basic.rq`,
+`gpad-relation-evidence-multiple.rq`, `gpad-extensions.rq`,
+`DefaultGPADData.equals/hashCode` (all under
+`minerva-converter/src/main/.../legacy/sparql/`), `ro-gpad.ofn` and
+`CoreMolecularModelManager.createInferredModel` (minerva-core).
 
-Where it is carried: unit `Item.meta`; every report row (`reports/*.jsonl`)
-and reject record (`*.rejects.tsv`, new columns `gpad_lines_est`,
-`contributors`, `all_failed_checks` after `detail`); the surviving manifest
-`SB-final.units.manifest.jsonl` (now full items with meta, not bare ids);
-`model_stats.jsonl` (`total_lines_est`, `passing_lines_est`); `summary.tsv`
-(`LinesIn`, `LinesRemoved`, `LinesOut` beside the unit columns); the dashboard
-cards, funnel rows, drill-down and model axes.
+What minerva does:
 
-**Phase A line totals.** Models removed in Phase A are parsed once by a cheap
-counting pass (`unit_rules.count_model`, same parser as Phase B, hooked into
-`run_stage(on_reject=…)`), so their unit / line / contributor totals land in
-the reject record and the summary. Exception: rules in `cli.SET_ASIDE_RULE_IDS`
-(`not_true_gocam`): true GO-CAMs are not losses, are never parsed, and are
-reported on a separate summary row with `Phase = A-set-aside` (`In = Out =`
-models set aside, `Removed = 0`, line cells empty = not estimated), emitted
-only when the rule set at least one model aside. Phase A line columns are
-filled backwards from the Phase B input total (`lines_out(i) = lines_in(i+1)`,
-`lines_in(i) = lines_out(i) + lines removed at i`, 0 for a set-aside rule), so
-the counted universe is "models that reach Phase B plus models removed by a
-non-set-aside rule"; the `not_true_gocam` stage row shows `LinesRemoved = 0`
-by construction. A Phase-A-only run (no `--go`) has no counting pass: all line
-cells are empty.
+1. **Inference first, on the abox alone.** The model's triples plus the tbox
+   RBox are reasoned with Arachne rules compiled from `ro-gpad.ofn`. No class
+   hierarchy is loaded (the `FIXME` in `gpad-basic.rq` says so), so every
+   "type" below is an asserted `rdf:type`. `ro-gpad.ofn` is a *trimmed* RO:
+   37 sub-property axioms, 14 chains, the `enables`/`enabled_by` and
+   `part_of`/`has_part` inverses, transitive `part_of`, `has_part`,
+   `located_in`. The chains that make GPAD lines: `enables o part_of →
+   involved_in`, `involved_in o part_of → involved_in`, `enables o occurs_in →
+   is_active_in`, `enables o RO_0002418 → acts_upstream_of_or_within` (and
+   the RO_0004046/RO_0004047 → negative/positive-effect variants),
+   `part_of o enables → contributes_to` (GP part_of complex enables MF),
+   `contributes_to o part_of/occurs_in → involved_in/is_active_in`,
+   `located_in o part_of → located_in`, `occurs_in o part_of → occurs_in`,
+   `part_of o occurs_in → occurs_in`, `enables o has_part → enables`.
+   `regulates` and its descendants are NOT sub-properties of RO_0002418 in
+   this file, so an MF `-positively_regulates->` BP edge yields no line.
+2. **Candidates (`gpad-basic.rq`)**: inferred `GP -q-> T` where `q` is one of
+   the twelve qualifiers (`enables`, `involved_in`, `part_of`,
+   `acts_upstream_of[_or_within][_positive|negative_effect]`,
+   `contributes_to`, `located_in`, `is_active_in`), GP has an asserted IRI
+   type that is not a GO/PO/UBERON/CL/EMAPA/CHEBI/BioPAX class (so a complex
+   individual typed by a GO term is never the DB object), and T has an
+   asserted GO type (`owl:complementOf` → `NOT`). One candidate per GP type
+   and per T type when a node carries several. Per (GP node, T node) only the
+   most specific qualifier survives (RBox `rdfs:subPropertyOf`). A T typed as
+   the MF root keeps only `enables`/`contributes_to`.
+3. **Evidence per line.** Each candidate is explained back to asserted edges;
+   every edge in an explanation must carry usable evidence, and the line's
+   evidence is taken from the explanation edges that touch T: the
+   `enabled_by` edge for `enables`, the MF→BP / MF→CC edge for
+   `involved_in` / `is_active_in` / `acts_upstream_of_or_within`, the hop's
+   own edge for a `BP part_of BP2` / `CC part_of CC2` hop. Edges on the GP
+   side of T (`has_input`, `occurs_in` of a BP line's MF, …) therefore never
+   get a line; they fold into the extension column
+   (`gpad-extensions.rq`: 80 relations, filler = the asserted type of the
+   connected individual, kept only when all facts of the extension's
+   explanation have evidence with the SAME reference as the line; EMAPA
+   present ⇒ UBERON fillers dropped). Usable evidence = an evidence
+   individual with an asserted ECO type, `dc:contributor`, `dc:date` and
+   `dc:source`; one row per (ECO type, date, `evidence-with` value).
+4. **It is evidence-per-line, deduplicated.** Lines are a `HashSet<GPADData>`
+   keyed on (GP type, NOT, qualifier, GO class, extensions, reference, ECO,
+   with, taxon, date, assigned_by, contributors, model id, model state): two
+   edges or two GP individuals with identical evidence metadata yield ONE
+   line, model-wide.
+5. **Drops**: a root-term line (MF/BP/CC root) needs ND (`ECO:0000307`); a GP
+   *type* with any non-root MF annotation in the model loses its root-MF lines
+   (`gpsWithAnyMFNotRootMF`, model-wide); a GP node annotated to a class that
+   another of its annotated classes regulates (`regulation_targets.rq` over
+   GO's `regulates`-family restrictions, is_a-closed both ways) loses that
+   line. A model that is OWL-inconsistent gets no file.
+
+How the ratchet replays it (`unit_rules.py`): `_closure` forward-chains the
+`ro-gpad.ofn` axioms over the unit's edges, keeping each derived fact's
+explanations (sets of edge ids); `unit_gpad_lines` applies 2–5 and returns the
+unit's distinct `GpadLine` tuples (the dedup key minus the per-model
+constants); `model_gpad_lines` applies the two model-wide parts — the
+root-MF suppression across units and the model-wide dedup, counting a line
+produced by two units once, in the lower-indexed unit — so that the unit
+values sum to the model's count. `gpad_lines_estimate(annotation, gcg,
+builder)` is the unit-alone value. The regulation filter needs
+`builder.ontology` (ontobio logical definitions + `regulates` edges, cached
+per builder); without a builder it is skipped. What the unit model cannot see
+is exactly those two cross-unit effects, which is why the per-unit numbers
+are assigned, not independent: removing only the counted unit of a duplicate
+pair loses no line in the real export (CAVEAT in `model_gpad_lines`).
+
+**Validation (2026-10-26, `scripts/validate_gpad_lines.py --gpad-actuals`).**
+Actuals: minerva's per-model GPAD from the pipeline's 2026-08-28 build
+(53,927 files, 394,275 non-header lines; counted on the build host into
+`target/gpad-actuals-20260828.tsv`, not committed). Corpus: a `noctua-models`
+checkout at the matching 2026-08-28 commit (`8039784`), random sample of
+6,000 models plus the old estimate's 20 worst:
+
+| estimate | Σ est / Σ actual | exact models | median abs err |
+|---|---|---|---|
+| old (`evidence_pairs`) | 94,908 / 48,960 = **1.94** | 656 / 6,020 (10.9 %) | 2 |
+| new, unit-alone sum | 50,668 / 48,960 = 1.035 | 4,427 (73.5 %) | 0 |
+| new, as reported (`model_gpad_lines`) | 48,969 / 48,960 = **1.0002** | **6,016 / 6,020 (99.9 %)** | 0 |
+
+By source: MGI (2,731 models), ZFIN, SGD, SYNGO, YeastPathways and WB are
+100 % exact; Noctua-curated models 99.6 % (1,048 / 1,052). The old estimate's
+20 worst (e.g. MGI_MGI_87916 1,219 → 426 vs 422 actual) are 19 / 20 exact.
+Unresolved: `60ad85f700002009` (492 vs 484; 467 of its lines are
+`involved_in`, no rule above explains the 8), `68fac5ed00003196` (19 vs 20),
+`613aae0000000341` (15 vs 14), `5716c41300000127` (14 vs 13). Every bundled
+fixture present in the export matches exactly (`make ratchet-smoke` then the
+validator: 13 / 14, the odd one being an older copy of its model).
+
+Where it is carried (unchanged): unit `Item.meta`; every report row
+(`reports/*.jsonl`) and reject record (`*.rejects.tsv`, columns
+`gpad_lines_est`, `contributors`, `all_failed_checks` after `detail`); the
+surviving manifest `SB-final.units.manifest.jsonl` (full items with meta);
+`model_stats.jsonl` (`total_lines_est`, `passing_lines_est`, now also
+`total_evidence_pairs`); `summary.tsv` (`LinesIn`, `LinesRemoved`, `LinesOut`
+beside the unit columns); the dashboard cards, funnel rows, drill-down and
+model axes. Fixture values: 66c7d41500000016 12 (13 evidence pairs; a
+`has_input` edge folds into the `enables` line), MGI_MGI_1100089 40 (99
+pairs), SYNGO_5371 6, R-HSA-9937080 0 (REACTO-typed individuals, no GO
+target), 57c82fad00000252 6.
 
 ### Contributors
 
